@@ -278,4 +278,5 @@ dump.rdb
 .env
 .envs/*
 !.envs/.local/
-.pem
+
+*.pem
