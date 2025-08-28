@@ -1,0 +1,96 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY_PRIVATE }} # <-- updated secret name
+
+      - name: Prepare EC2 and clean Docker
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} '
+            set -e
+            sudo yum update -y
+            sudo yum install -y curl jq docker awscli --allowerasing
+            sudo systemctl enable --now docker
+            sudo usermod -aG docker ec2-user
+
+            # Install docker-compose if missing
+            if ! command -v docker-compose &> /dev/null; then
+              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+              sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+            fi
+
+            echo "==== 🧹 Cleaning containers/images/volumes ===="
+            set +e
+            docker ps -aq | xargs -r docker stop
+            docker ps -aq | xargs -r docker rm -f
+            docker images -aq | xargs -r docker rmi -f
+            docker volume ls -q | xargs -r docker volume rm
+            docker system prune -af --volumes
+            set -e
+
+            echo "==== 📂 Reset project folder ===="
+            sudo chown -R ec2-user:ec2-user /home/ec2-user/luchandoporviviryservir || true
+            rm -rf /home/ec2-user/luchandoporviviryservir
+          '
+
+      - name: Rsync project to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "==== 📤 Rsyncing project to ec2-user@${EC2_HOST}:/home/ec2-user/luchandoporviviryservir ===="
+          rsync -az --delete --exclude='.git' --exclude='node_modules' ./ ec2-user@${EC2_HOST}:/home/ec2-user/luchandoporviviryservir/
+
+      - name: Start stack on EC2 (fetch DOMAIN+EMAIL, build & up)
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "==== ▶️ Running remote docker compose (build + up) ===="
+          ssh -o StrictHostKeyChecking=no ec2-user@$EC2_HOST << 'EOF'
+          set -xe
+          cd /home/ec2-user/luchandoporviviryservir
+
+          echo "==== 🔑 Fetching DOMAIN + EMAIL from SSM ===="
+          DOMAIN=$(aws ssm get-parameter --name "/lpvs/DOMAIN" --with-decryption --query "Parameter.Value" --output text)
+          EMAIL=$(aws ssm get-parameter --name "/lpvs/EMAIL" --with-decryption --query "Parameter.Value" --output text)
+
+          echo "DOMAIN: '${DOMAIN}'"
+          echo "EMAIL: '${EMAIL}'"
+
+          sudo mkdir -p ./compose/deployment/acme
+          sudo touch ./compose/deployment/acme/acme.json || true
+          sudo chmod 600 ./compose/deployment/acme/acme.json || true
+
+          echo "==== 📦 Building and starting containers ===="
+          DOMAIN="$DOMAIN" EMAIL="$EMAIL" sudo docker compose -f deployment.yml up --build -d
+
+          echo "==== ✅ docker compose ps ===="
+          sudo docker compose -f deployment.yml ps || true
+
+          echo "==== 📦 docker images (top 20) ===="
+          sudo docker images | head -n 20 || true
+
+          echo "==== 🐳 Recent logs (up to 200 lines) ===="
+          for svc in traefik nginx backend db; do
+            echo "---- logs: $svc ----"
+            sudo docker compose -f deployment.yml logs --no-color --tail=200 $svc || true
+          done
+
+          echo "==== 🎉 Deployment finished ===="
+          EOF

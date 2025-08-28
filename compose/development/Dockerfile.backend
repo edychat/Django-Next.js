@@ -1,0 +1,54 @@
+# compose/development/Dockerfile.backend
+# ---------- Build Stage ----------
+FROM python:3.12.5-slim-bookworm AS python-build-stage
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and build wheels
+COPY requirements/ ./requirements/
+RUN pip wheel --wheel-dir /wheels -r requirements/development.txt
+
+
+# ---------- Runtime Stage ----------
+FROM python:3.12.5-slim-bookworm AS python-run-stage
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gettext \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps from wheels
+COPY --from=python-build-stage /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+    && rm -rf /wheels
+
+# Create app user
+RUN addgroup --system django && adduser --system --ingroup django django
+
+# Copy project's code
+COPY --chown=django:django . /app
+
+USER django
+
+# Default dev command: migrate + superuser + runserver_plus
+CMD python manage.py migrate --noinput && \
+    echo "from django.contrib.auth import get_user_model; \
+    User = get_user_model(); \
+    User.objects.filter(username='${DJANGO_SUPERUSER_USERNAME}').exists() or \
+    User.objects.create_superuser('${DJANGO_SUPERUSER_USERNAME}', '${DJANGO_SUPERUSER_EMAIL}', '${DJANGO_SUPERUSER_PASSWORD}')" \
+    | python manage.py shell && \
+    exec python manage.py runserver_plus 0.0.0.0:8000 --nopin

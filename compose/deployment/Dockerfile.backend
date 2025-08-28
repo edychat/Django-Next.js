@@ -1,0 +1,84 @@
+# compose/deployment/Dockerfile.backend
+# ---------- Build Stage ----------
+FROM python:3.11-slim AS python-build-stage
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and build wheels
+COPY modules/requirements/ ./requirements/
+RUN pip wheel --wheel-dir /wheels -r requirements/deployment.txt
+
+# ---------- Runtime Stage ----------
+FROM python:3.11-slim AS python-run-stage
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gettext \
+    awscli \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps from wheels
+COPY --from=python-build-stage /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+    && rm -rf /wheels
+
+# Create app user
+RUN addgroup --system django && adduser --system --ingroup django django
+
+# Copy project code
+COPY --chown=django:django . /app
+
+# Add inline entrypoint script
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -e' \
+    'echo "Starting entrypoint..."' \
+    '' \
+    'if command -v aws >/dev/null 2>&1; then' \
+    '  echo "Fetching secrets from AWS SSM..."' \
+    '  export DJANGO_SECRET_KEY=$(aws ssm get-parameter --name "/lpvs/DJANGO_SECRET_KEY" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DB_PASSWORD=$(aws ssm get-parameter --name "/lpvs/DB_PASSWORD" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DB_USER=$(aws ssm get-parameter --name "/lpvs/DB_USER" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DB_NAME=$(aws ssm get-parameter --name "/lpvs/DB_NAME" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DB_HOST=$(aws ssm get-parameter --name "/lpvs/DB_HOST" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DB_PORT=$(aws ssm get-parameter --name "/lpvs/DB_PORT" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DOMAIN=$(aws ssm get-parameter --name "/lpvs/DOMAIN" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export EMAIL=$(aws ssm get-parameter --name "/lpvs/EMAIL" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DEBUG=$(aws ssm get-parameter --name "/lpvs/DEBUG" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DJANGO_SUPERUSER_PASSWORD=$(aws ssm get-parameter --name "/lpvs/DJANGO_SUPERUSER_PASSWORD" --with-decryption --query "Parameter.Value" --output text)' \
+    '  export DJANGO_SUPERUSER_USERNAME=$(aws ssm get-parameter --name "/lpvs/DJANGO_SUPERUSER_USERNAME" --with-decryption --query "Parameter.Value" --output text)' \
+    '  echo "Secrets loaded from SSM."' \
+    'fi' \
+    '' \
+    'exec "$@"' \
+    > /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Use entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Switch to non-root
+USER django
+
+# --- Run collectstatic and migrate at container start ---
+CMD sh -c "\
+echo 'Running migrations...' && \
+python manage.py migrate --noinput && \
+echo 'Collecting static files...' && \
+python manage.py collectstatic --noinput && \
+echo 'Starting Gunicorn...' && \
+exec gunicorn --bind 0.0.0.0:8000 myproject.wsgi:application \
+"

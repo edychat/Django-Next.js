@@ -1,0 +1,76 @@
+# development.yml
+# Run with: docker compose -f development.yml up --build
+services:
+  traefik:
+    image: traefik:v3.5
+    ports:
+      - "80:80"      # HTTP
+      - "443:443"    # HTTPS
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    command:
+      # Logging & dashboard
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+      - "--ping=true"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"                  # HTTP
+      - "--entrypoints.web.http.redirections.entryPoint.to=web-secure"  # optional redirect to HTTPS
+      - "--entrypoints.web-secure.address=:443"         # HTTPS
+      - "--entrypoints.web-secure.http.tls=true"        # self-signed TLS
+      # Docker provider
+      - "--providers.docker.exposedbydefault=false"
+
+  backend:
+    env_file: .env
+    build:
+      context: ./modules
+      dockerfile: ../compose/development/Dockerfile.backend
+    volumes:
+      - ./modules:/app:delegated
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/static`)"
+      - "traefik.http.routers.backend.entrypoints=web,web-secure"
+      - "traefik.http.routers.backend.priority=20"
+      - "traefik.http.routers.backend.tls=true"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+
+  frontend:
+    build:
+      context: ./ui
+      dockerfile: ../compose/development/Dockerfile.frontend
+    volumes:
+      - ./ui:/app:delegated
+      - /app/node_modules
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web,web-secure"
+      - "traefik.http.routers.frontend.priority=10"
+      - "traefik.http.routers.frontend.tls=true"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  db_data:

@@ -1,0 +1,55 @@
+# compose/deployment/Dockerfile.nginx
+# ---------- Build Stage ----------
+FROM node:20-slim AS build
+
+WORKDIR /app
+
+# Copy dependency manifests
+COPY ui/package*.json ./
+
+# Copy deps file
+COPY modules/requirements/npm.txt /deps/npm.txt
+
+# Install deps listed in npm.txt into package.json
+RUN npm install --legacy-peer-deps && \
+    while IFS= read -r dep; do \
+      if [ -n "$$dep" ] && [ "$${dep#\#}" = "$$dep" ]; then \
+        pkg=$$(echo "$$dep" | cut -d@ -f1) && \
+        if ! npm ls "$$pkg" --depth=0 >/dev/null 2>&1; then \
+          echo "📦 Installing $$dep..." && \
+          npm install "$$dep" --save --legacy-peer-deps; \
+        else \
+          echo "✅ $$dep already in package.json, skipping."; \
+        fi; \
+      fi; \
+    done < /deps/npm.txt && \
+    npm ci --legacy-peer-deps
+
+# Copy the rest of the project
+COPY ui/ ./
+
+# Set env for production build
+ENV NODE_ENV=production
+
+# Build and export static site
+RUN npm run build && npm run export
+
+# ---------- Nginx Stage ----------
+FROM nginx:1.27-alpine
+
+# Remove default config
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Copy custom nginx config
+COPY compose/deployment/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy exported static site
+COPY --from=build /app/out /usr/share/nginx/html
+
+# Fix permissions
+RUN chown -R nginx:nginx /usr/share/nginx/html
+
+USER nginx
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

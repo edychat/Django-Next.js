@@ -1,0 +1,53 @@
+#initiation.yml
+# docker compose -f initiation.yml run --rm frontend-init ; docker compose -f initiation.yml run --rm backend-init
+# APP_NAME=app docker compose -f initiation.yml run --rm app-init
+
+services:
+  frontend-init:
+    image: node:20
+    volumes:
+      - ./ui:/app
+    working_dir: /app
+    command: sh -c "npx create-next-app@latest . && npm install"
+
+  backend-init:
+    image: python:3.11-slim
+    volumes:
+      - ./modules:/app
+    working_dir: /app
+    command: >
+      sh -c "
+      apt-get update &&
+      apt-get install -y sed &&
+      pip install --upgrade pip &&
+      pip install django python-decouple djangorestframework django-cors-headers &&
+      django-admin startproject backend . && \
+      sed -i \"/from pathlib import Path/i import os\" backend/settings.py && \
+      sed -i \"s/^DEBUG = .*/DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1', 'yes')/\" backend/settings.py && \
+      sed -i \"s/^ALLOWED_HOSTS = .*/ALLOWED_HOSTS = os.getenv('HOSTS').split(',')/\" backend/settings.py && \
+      sed -i \"/INSTALLED_APPS = \\[/a \\ \\ \\ \\ 'corsheaders',\\n\\ \\ \\ \\ 'rest_framework',\" backend/settings.py && \
+      sed -i \"/INSTALLED_APPS = \\[/a \\ \\ \\ \\ 'django_extensions',\\n\\ \\ \\ \\ 'rest_framework',\" backend/settings.py && \
+      sed -i \"/MIDDLEWARE = \\[/a \\ \\ \\ \\ 'corsheaders.middleware.CorsMiddleware',\" backend/settings.py && \
+      sed -i \"/MIDDLEWARE = \\[/a \\ \\ \\ \\ 'whitenoise.middleware.WhiteNoiseMiddleware',\" backend/settings.py && \
+      sed -i \"/MIDDLEWARE = \\[/a \\ \\ \\ \\ 'django.middleware.locale.LocaleMiddleware',\" backend/settings.py && \
+      sed -i \"/^LANGUAGE_CODE = .*/a LANGUAGES = [\\n    ('en', 'English'),\\n    ('es', 'Spanish'),\\n]\" backend/settings.py && \
+      sed -i \"/# Database/,+8d\" backend/settings.py && \
+      printf '\\n# Database\\n# https://docs.djangoproject.com/en/5.2/ref/settings/#databases\\n\\nDATABASES = {\\n    '\\''default'\\'': {\\n        '\\''ENGINE'\\'': '\\''django.db.backends.postgresql'\\'',\\n        '\\''NAME'\\'': os.getenv('\\''DB_NAME'\\''),\\n        '\\''USER'\\'': os.getenv('\\''DB_USER'\\''),\\n        '\\''PASSWORD'\\'': os.getenv('\\''DB_PASSWORD'\\''),\\n        '\\''HOST'\\'': os.getenv('\\''DB_HOST'\\''),\\n        '\\''PORT'\\'': os.getenv('\\''DB_PORT'\\''),\\n    }\\n}\\n\\n' >> backend/settings.py && \
+      echo \"\\nCORS_ALLOW_ALL_ORIGINS = True\" >> backend/settings.py
+      "
+
+  app-init:
+    image: python:3.11-slim
+    volumes:
+      - ./modules:/app
+    working_dir: /app
+    command: >
+      sh -c "
+      apt-get update &&
+      apt-get install -y sed &&
+      pip install --upgrade pip &&
+      pip install django python-decouple djangorestframework django-cors-headers &&
+      django-admin startapp ${APP_NAME}
+      "
+    environment:
+      - APP_NAME=app

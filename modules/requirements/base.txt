@@ -1,0 +1,15 @@
+# modules/requirements/base.txt
+
+# Django core dependencies
+Django
+djangorestframework
+django-cors-headers
+django-environ
+django-redis
+
+# Add-ons
+stripe
+psycopg[binary]==3.2.1
+whitenoise
+redis
+hiredis

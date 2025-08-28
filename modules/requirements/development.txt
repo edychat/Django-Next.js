@@ -1,0 +1,24 @@
+-r base.txt
+
+Werkzeug[watchdog]==3.0.4
+ipdb==0.13.13
+
+# Testing
+mypy==1.11.2
+django-stubs[compatible-mypy]==5.0.4
+pytest==8.3.2
+pytest-sugar==1.0.0
+djangorestframework-stubs==3.15.0
+
+# Code quality
+ruff==0.6.2
+coverage==7.6.1
+djlint==1.34.1
+pre-commit==3.8.0
+
+# Django dev tools
+factory-boy==3.3.1
+django-debug-toolbar==4.4.6
+django-extensions==3.2.3
+django-coverage-plugin==3.1.0
+pytest-django==4.8.0

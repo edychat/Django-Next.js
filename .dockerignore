@@ -1,0 +1,53 @@
+# VCS
+.git
+.gitignore
+.editorconfig
+.gitattributes
+.github
+.gitlab-ci.yml
+.idea
+.pre-commit-config.yaml
+.readthedocs.yml
+.travis.yml
+.pem
+
+# Python cache & compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Virtual environments
+.env
+.venv/
+venv/
+venv
+env/
+*.egg-info/
+.eggs/
+
+# Node / frontend
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# Dev / editor stuff
+*.swp
+*.swo
+*.DS_Store
+.idea/
+.vscode/
+
+# Tests / docs (not needed in prod)
+tests/
+docs/
