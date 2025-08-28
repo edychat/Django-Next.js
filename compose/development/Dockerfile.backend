@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and build wheels
-COPY requirements/ ./requirements/
+COPY modules/requirements/ ./requirements/
 RUN pip wheel --wheel-dir /wheels -r requirements/development.txt
 
 

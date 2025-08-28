@@ -28,8 +28,8 @@ services:
   backend:
     env_file: .env
     build:
-      context: ./modules
-      dockerfile: ../compose/development/Dockerfile.backend
+      context: .
+      dockerfile: ./compose/development/Dockerfile.backend
     volumes:
       - ./modules:/app:delegated
     depends_on:
@@ -45,8 +45,8 @@ services:
 
   frontend:
     build:
-      context: ./ui
-      dockerfile: ../compose/development/Dockerfile.frontend
+      context: .
+      dockerfile: ./compose/development/Dockerfile.frontend
     volumes:
       - ./ui:/app:delegated
       - /app/node_modules
