@@ -1,6 +1,7 @@
 #initiation.yml
 # docker compose -f initiation.yml run --rm frontend-init ; docker compose -f initiation.yml run --rm backend-init
 # APP_NAME=app docker compose -f initiation.yml run --rm app-init
+# docker compose -f initiation.yml run --rm npm-init
 
 services:
   frontend-init:
@@ -14,6 +15,41 @@ services:
         npx create-next-app@latest . &&
         npm install
       "
+
+
+  npm-init:
+    image: node:18-slim
+    working_dir: /app
+    volumes:
+      - ./ui:/app
+      - ./modules/requirements/npm.txt:/deps/npm.txt:ro
+    command: >
+      sh -c '
+        apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/* &&
+        echo "📦 Syncing npm dependencies with /deps/npm.txt..." &&
+
+        wanted_deps=$(grep -v "^\s*#" /deps/npm.txt | sed "/^\s*$/d")
+
+        for dep in $$wanted_deps; do
+          if ! grep -q "\"$$dep\"" package.json; then
+            echo "Installing $$dep..."
+            npm install "$$dep" --save --legacy-peer-deps
+          else
+            echo "$$dep already present, skipping."
+          fi
+        done
+
+        # Remove extra deps not in npm.txt
+        current_deps=$(jq -r ".dependencies | keys[]" package.json)
+        for dep in $$current_deps; do
+          if ! echo "$$wanted_deps" | grep -qx "$$dep"; then
+            echo "Removing extra dependency $$dep..."
+            npm uninstall "$$dep" --save
+          fi
+        done
+
+        echo "✅ package.json now strictly matches /deps/npm.txt"
+      '
 
 
   backend-init:

@@ -1,31 +1,15 @@
 # compose/development/Dockerfile.frontend
 # Using Next
 FROM node:20-slim
-
 WORKDIR /app
 
-# Copy package.json and package-lock.json
+# Copy package file
 COPY ui/package*.json ./
 
-# Copy your npm.txt
-COPY modules/requirements/npm.txt /deps/npm.txt
+# Install dependencies
+RUN npm ci --legacy-peer-deps
 
-# Install missing dependencies from npm.txt
-RUN while IFS= read -r dep; do \
-        # skip empty lines and comments
-        if [ -n "$$dep" ] && [ "$${dep#\#}" = "$$dep" ]; then \
-            echo "📦 Installing $$dep..."; \
-            npm install "$$dep" --save --legacy-peer-deps; \
-        fi; \
-    done < /deps/npm.txt
-
-# Install everything cleanly according to updated package.json
-RUN npm install --legacy-peer-deps
-
-# Copy rest of the source code
-COPY ui/ ./
-
-# Dev environment variables
+# Environment variables for dev hot reload
 ENV NODE_ENV=development
 ENV CHOKIDAR_USEPOLLING=true
 ENV WATCHPACK_POLLING=true
@@ -33,4 +17,5 @@ ENV HOST=0.0.0.0
 
 EXPOSE 3000
 
+# Start Next.js dev server
 CMD ["npm", "run", "dev"]
