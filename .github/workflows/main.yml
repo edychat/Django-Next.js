@@ -18,25 +18,28 @@ jobs:
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.5.3
         with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEY_PRIVATE }} # <-- updated secret name
+          ssh-private-key: ${{ secrets.DEPLOY_KEY_PRIVATE }}
 
       - name: Prepare EC2 and clean Docker
         run: |
           ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} '
             set -e
+
+            echo -e "\n\033[1;34m==== 🔧 Updating and installing packages ====\033[0m"
             sudo yum update -y
             sudo yum install -y curl jq docker awscli --allowerasing
             sudo systemctl enable --now docker
             sudo usermod -aG docker ec2-user
 
-            # Install docker-compose if missing
-            if ! command -v docker-compose &> /dev/null; then
-              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
-              sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+            # Ensure docker compose plugin is installed
+            if ! docker compose version &> /dev/null; then
+              echo "Installing Docker Compose plugin..."
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
             fi
 
-            echo "==== 🧹 Cleaning containers/images/volumes ===="
+            echo -e "\n\033[1;34m==== 🧹 Cleaning containers, images, volumes ====\033[0m"
             set +e
             docker ps -aq | xargs -r docker stop
             docker ps -aq | xargs -r docker rm -f
@@ -45,7 +48,7 @@ jobs:
             docker system prune -af --volumes
             set -e
 
-            echo "==== 📂 Reset project folder ===="
+            echo -e "\n\033[1;34m==== 📂 Reset project folder ====\033[0m"
             sudo chown -R ec2-user:ec2-user /home/ec2-user/luchandoporviviryservir || true
             rm -rf /home/ec2-user/luchandoporviviryservir
           '
@@ -54,43 +57,45 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          echo "==== 📤 Rsyncing project to ec2-user@${EC2_HOST}:/home/ec2-user/luchandoporviviryservir ===="
+          echo -e "\n\033[1;33m==== 📤 Rsyncing project to EC2 ====\033[0m"
           rsync -az --delete --exclude='.git' --exclude='node_modules' ./ ec2-user@${EC2_HOST}:/home/ec2-user/luchandoporviviryservir/
 
       - name: Start stack on EC2 (fetch DOMAIN+EMAIL, build & up)
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          echo "==== ▶️ Running remote docker compose (build + up) ===="
+          echo -e "\n\033[1;33m==== ▶️ Running remote docker compose (build + up) ====\033[0m"
           ssh -o StrictHostKeyChecking=no ec2-user@$EC2_HOST << 'EOF'
           set -xe
+
           cd /home/ec2-user/luchandoporviviryservir
 
-          echo "==== 🔑 Fetching DOMAIN + EMAIL from SSM ===="
+          echo -e "\n\033[1;32m==== 🔑 Fetching DOMAIN + EMAIL from SSM ====\033[0m"
           DOMAIN=$(aws ssm get-parameter --name "/lpvs/DOMAIN" --with-decryption --query "Parameter.Value" --output text)
           EMAIL=$(aws ssm get-parameter --name "/lpvs/EMAIL" --with-decryption --query "Parameter.Value" --output text)
 
-          echo "DOMAIN: '${DOMAIN}'"
-          echo "EMAIL: '${EMAIL}'"
+          echo -e "\033[1;36mDOMAIN: '${DOMAIN}'\033[0m"
+          echo -e "\033[1;36mEMAIL: '${EMAIL}'\033[0m"
 
+          echo -e "\n\033[1;34m==== 📁 Preparing ACME folder ====\033[0m"
           sudo mkdir -p ./compose/deployment/acme
           sudo touch ./compose/deployment/acme/acme.json || true
           sudo chmod 600 ./compose/deployment/acme/acme.json || true
 
-          echo "==== 📦 Building and starting containers ===="
+          echo -e "\n\033[1;34m==== 📦 Building and starting containers ====\033[0m"
           DOMAIN="$DOMAIN" EMAIL="$EMAIL" sudo docker compose -f deployment.yml up --build -d
 
-          echo "==== ✅ docker compose ps ===="
+          echo -e "\n\033[1;34m==== ✅ docker compose ps ====\033[0m"
           sudo docker compose -f deployment.yml ps || true
 
-          echo "==== 📦 docker images (top 20) ===="
+          echo -e "\n\033[1;34m==== 📦 docker images (top 20) ====\033[0m"
           sudo docker images | head -n 20 || true
 
-          echo "==== 🐳 Recent logs (up to 200 lines) ===="
+          echo -e "\n\033[1;34m==== 🐳 Recent logs (up to 200 lines) ====\033[0m"
           for svc in traefik nginx backend db; do
-            echo "---- logs: $svc ----"
+            echo -e "\n---- logs: $svc ----"
             sudo docker compose -f deployment.yml logs --no-color --tail=200 $svc || true
           done
 
-          echo "==== 🎉 Deployment finished ===="
+          echo -e "\n\033[1;32m==== 🎉 Deployment finished ====\033[0m"
           EOF
