@@ -1,10 +1,12 @@
 # compose/deployment/Dockerfile.db
 FROM postgres:16
-EXPOSE 5432
 
+# Use the standard PostgreSQL image - no custom entrypoint needed
+# The environment variables will be set by docker-compose or fetched by backend
 
-# Add maintenance scripts (if any)
-# COPY ./compose/deployment/postgres/maintenance /usr/local/bin/maintenance
-# RUN chmod +x /usr/local/bin/maintenance/* \
-#    && mv /usr/local/bin/maintenance/* /usr/local/bin \
-#    && rmdir /usr/local/bin/maintenance
+# Just ensure proper permissions on the data directory
+RUN mkdir -p /var/lib/postgresql/data && \
+    chown -R postgres:postgres /var/lib/postgresql/data && \
+    chmod 700 /var/lib/postgresql/data
+
+# Use the default PostgreSQL entrypoint and command

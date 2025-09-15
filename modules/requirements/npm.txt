@@ -1,6 +1,0 @@
-# /modules/requirements/npm.txt
-# frontend dependencies
-
-next
-react
-react-dom

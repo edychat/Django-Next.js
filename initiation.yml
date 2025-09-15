@@ -7,7 +7,7 @@ services:
   frontend-init:
     image: node:20
     volumes:
-      - ./ui:/app
+      - ./frontend:/app
     working_dir: /app
     command: >
       sh -c "
@@ -21,8 +21,8 @@ services:
     image: node:18-slim
     working_dir: /app
     volumes:
-      - ./ui:/app
-      - ./modules/requirements/npm.txt:/deps/npm.txt:ro
+      - ./frontend:/app
+      - ./compose/requirements/npm.txt:/deps/npm.txt:ro
     command: >
       sh -c '
         apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/* &&
@@ -55,7 +55,7 @@ services:
   backend-init:
     image: python:3.11-slim
     volumes:
-      - ./modules:/app
+      - ./backend:/app
     working_dir: /app
     command: >
       sh -c "
@@ -88,7 +88,7 @@ services:
   app-init:
     image: python:3.11-slim
     volumes:
-      - ./modules:/app
+      - ./backend:/app
     working_dir: /app
     command: >
       sh -c "

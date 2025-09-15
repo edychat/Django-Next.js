@@ -1,0 +1,59 @@
+# compose/deployment/Dockerfile.frontend
+# ---------- Build Stage ----------
+FROM node:20-slim AS build
+
+WORKDIR /app
+
+# Copy dependency manifests first (for better caching)
+COPY frontend/package*.json ./
+
+# Install all dependencies
+RUN npm ci --legacy-peer-deps
+
+# Copy the rest of the project
+COPY frontend/ ./
+
+# Set env for production build
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Build static site
+RUN npm run build
+
+# ---------- Nginx Stage ----------
+FROM nginx:1.27-alpine
+
+# Remove default config
+RUN rm -f /etc/nginx/conf.d/default.conf
+
+# Copy simple nginx configuration
+COPY compose/deployment/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy exported static site
+COPY --from=build /app/out /usr/share/nginx/html
+
+# Fix permissions
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chmod 755 /usr/share/nginx/html && \
+    chmod 644 /etc/nginx/conf.d/default.conf
+
+# Create health check endpoint
+RUN printf 'healthy\n' > /usr/share/nginx/html/health
+
+# Create entrypoint script
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -e' \
+    'echo "✅ Starting nginx for static file serving..."' \
+    '' \
+    '# Create temp directory for nginx with proper permissions' \
+    'mkdir -p /tmp/nginx && chown nginx:nginx /tmp/nginx' \
+    '' \
+    'exec nginx -g "daemon off;"' \
+    > /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Fix permissions on the config directory
+RUN chmod 755 /etc/nginx/conf.d
+
+EXPOSE 80
+ENTRYPOINT ["/entrypoint.sh"]

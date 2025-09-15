@@ -2,19 +2,25 @@
 # ---------- Build Stage ----------
 FROM python:3.11-slim AS python-build-stage
 
-WORKDIR /app
+WORKDIR /wheels
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install build dependencies
+# Runtime dependencies only (no build tools needed with binary packages)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libpq-dev \
+    gettext \
+    curl \
+    awscli \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and build wheels
-COPY modules/requirements/ ./requirements/
+# Copy only requirements to build wheels
+COPY compose/requirements/ ./requirements/
 RUN pip wheel --wheel-dir /wheels -r requirements/deployment.txt
+
+# Clean up the requirements directory after building wheels
+RUN rm -rf ./requirements
 
 # ---------- Runtime Stage ----------
 FROM python:3.11-slim AS python-run-stage
@@ -24,61 +30,63 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Install runtime dependencies
+# Runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev \
+    libpq5 \
     gettext \
+    curl \
     awscli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps from wheels
 COPY --from=python-build-stage /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+# Install only .whl files, not directories
+RUN pip install --no-cache-dir --no-index --find-links=/wheels $(find /wheels -name "*.whl") \
     && rm -rf /wheels
 
-# Create app user
 RUN addgroup --system django && adduser --system --ingroup django django
 
-# Copy project code
-COPY --chown=django:django . /app
+# Copy the entire project including backend folder
+COPY --chown=django:django . /app/
 
-# Add inline entrypoint script
+# Entrypoint that fetches from SSM (will work on EC2 with IAM role)
 RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -e' \
-    'echo "Starting entrypoint..."' \
-    '' \
-    'if command -v aws >/dev/null 2>&1; then' \
-    '  echo "Fetching secrets from AWS SSM..."' \
-    '  export DJANGO_SECRET_KEY=$(aws ssm get-parameter --name "/lpvs/DJANGO_SECRET_KEY" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DB_PASSWORD=$(aws ssm get-parameter --name "/lpvs/DB_PASSWORD" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DB_USER=$(aws ssm get-parameter --name "/lpvs/DB_USER" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DB_NAME=$(aws ssm get-parameter --name "/lpvs/DB_NAME" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DB_HOST=$(aws ssm get-parameter --name "/lpvs/DB_HOST" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DB_PORT=$(aws ssm get-parameter --name "/lpvs/DB_PORT" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DOMAIN=$(aws ssm get-parameter --name "/lpvs/DOMAIN" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export EMAIL=$(aws ssm get-parameter --name "/lpvs/EMAIL" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DEBUG=$(aws ssm get-parameter --name "/lpvs/DEBUG" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DJANGO_SUPERUSER_PASSWORD=$(aws ssm get-parameter --name "/lpvs/DJANGO_SUPERUSER_PASSWORD" --with-decryption --query "Parameter.Value" --output text)' \
-    '  export DJANGO_SUPERUSER_USERNAME=$(aws ssm get-parameter --name "/lpvs/DJANGO_SUPERUSER_USERNAME" --with-decryption --query "Parameter.Value" --output text)' \
-    '  echo "Secrets loaded from SSM."' \
-    'fi' \
-    '' \
-    'exec "$@"' \
-    > /entrypoint.sh && chmod +x /entrypoint.sh
+  '#!/bin/sh' \
+  'set -e' \
+  'echo "🔑 Preparing environment..."' \
+  '' \
+  'fetch_param() {' \
+  '  VAR_NAME=$1' \
+  '  PARAM_NAME=$2' \
+  '  if [ -z "$(eval echo \$$VAR_NAME)" ]; then' \
+  '    echo "→ fetching $PARAM_NAME into $VAR_NAME"' \
+  '    export $VAR_NAME=$(aws ssm get-parameter --name "$PARAM_NAME" --with-decryption --query "Parameter.Value" --output text)' \
+  '  fi' \
+  '}' \
+  '' \
+  'fetch_param DOMAIN "/lpvs/DOMAIN"' \
+  'fetch_param EMAIL "/lpvs/EMAIL"' \
+  'fetch_param DJANGO_SECRET_KEY "/lpvs/DJANGO_SECRET_KEY"' \
+  'fetch_param DB_PASSWORD "/lpvs/DB_PASSWORD"' \
+  'fetch_param DB_USER "/lpvs/DB_USER"' \
+  'fetch_param DB_NAME "/lpvs/DB_NAME"' \
+  'fetch_param DB_HOST "/lpvs/DB_HOST"' \
+  'fetch_param DB_PORT "/lpvs/DB_PORT"' \
+  'fetch_param DEBUG "/lpvs/DEBUG" || export DEBUG=False' \
+  'fetch_param HOSTS "/lpvs/HOSTS" || export HOSTS="localhost,127.0.0.1,0.0.0.0"' \
+  '' \
+  'echo "✅ Secrets injected."' \
+  '' \
+  'echo "📦 Running migrations..."' \
+  'cd /app/backend && python manage.py migrate --noinput' \
+  '' \
+  'echo "📦 Collecting static files..."' \
+  'cd /app/backend && python manage.py collectstatic --noinput' \
+  '' \
+  'echo "🔥 Launching Gunicorn..."' \
+  'exec "$@"' \
+  > /entrypoint.sh && chmod +x /entrypoint.sh
 
-# Use entrypoint
-ENTRYPOINT ["/entrypoint.sh"]
-
-# Switch to non-root
 USER django
 
-# --- Run collectstatic and migrate at container start ---
-CMD sh -c "\
-echo 'Running migrations...' && \
-python manage.py migrate --noinput && \
-echo 'Collecting static files...' && \
-python manage.py collectstatic --noinput && \
-echo 'Starting Gunicorn...' && \
-exec gunicorn --bind 0.0.0.0:8000 myproject.wsgi:application \
-"
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "backend.wsgi:application"]
