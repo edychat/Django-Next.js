@@ -1,0 +1,87 @@
+# deployment.yml
+# Run with: docker compose -f deployment.yml build --parallel && docker compose -f deployment.yml up -d --remove-orphans
+
+services:
+  traefik:
+    build:
+      context: .
+      dockerfile: ./compose/deployment/Dockerfile.traefik
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./compose/deployment/acme:/etc/traefik/acme
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./compose/deployment/Dockerfile.backend
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend-api.rule=PathPrefix(`/api`) || PathPrefix(`/admin`)"
+      - "traefik.http.routers.backend-static.rule=PathPrefix(`/static`)"
+      - "traefik.http.routers.backend-api.entrypoints=web-secure"
+      - "traefik.http.routers.backend-static.entrypoints=web-secure"
+      - "traefik.http.routers.backend-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.backend-static.tls.certresolver=letsencrypt"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 90s
+    depends_on:
+      db:
+        condition: service_healthy
+      traefik:
+        condition: service_started
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./compose/deployment/Dockerfile.frontend
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web-secure"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      traefik:
+        condition: service_started
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  db_data:

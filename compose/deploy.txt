@@ -1,0 +1,199 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔑 Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_DEPLOY_KEY }}
+
+      - name: 🚀 Deploy to EC2
+        run: |
+          REPO_NAME=$(basename $GITHUB_REPOSITORY)
+          echo "Repository name: $REPO_NAME"
+
+          # Create optimized tarball (exclude development files)
+          tar -czf /tmp/deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='.pytest_cache' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='docker-compose.override.yml' \
+            .
+
+          # Copy code to EC2 with keep-alive
+          scp -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              -o ServerAliveInterval=60 \
+              /tmp/deploy.tar.gz \
+              ec2-user@${{ secrets.EC2_HOST }}:/tmp/
+
+          # Execute deployment on EC2 with keep-alive
+          ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              -o ServerAliveInterval=60 \
+              -o ServerAliveCountMax=10 \
+              ec2-user@${{ secrets.EC2_HOST }} "
+            set -euo pipefail
+
+            echo -e '\n\033[1;34m==== 🏗️  Starting deployment ====\033[0m'
+
+            # Install Docker if needed
+            if ! command -v docker &> /dev/null; then
+              echo 'Installing Docker...'
+              sudo yum update -y -q
+              sudo yum install -y -q docker
+              sudo systemctl start docker
+              sudo systemctl enable docker
+              sudo usermod -a -G docker ec2-user
+            fi
+
+            # Install Docker Compose V2 if needed
+            if ! command -v docker-compose &> /dev/null; then
+              echo 'Installing Docker Compose V2...'
+              DOCKER_COMPOSE_DEST=/usr/local/bin/docker-compose
+              sudo curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" \
+                -o \$DOCKER_COMPOSE_DEST
+              sudo chmod +x \$DOCKER_COMPOSE_DEST
+            fi
+
+            # Install AWS CLI v2 if needed
+            if ! command -v aws &> /dev/null; then
+              echo 'Installing AWS CLI v2...'
+              curl \"https://awscli.amazonaws.com/awscli-exe-linux-\$(uname -m).zip\" -o \"awscliv2.zip\"
+              unzip awscliv2.zip
+              sudo ./aws/install
+              rm -rf awscliv2.zip aws
+            fi
+
+            # Install unzip if not present
+            if ! command -v unzip &> /dev/null; then
+              echo 'Installing unzip...'
+              sudo yum install -y -q unzip
+            fi
+
+            # Verify installations
+            echo 'Docker version:'
+            sudo docker --version
+            echo 'Docker Compose version:'
+            sudo docker-compose --version
+            echo 'AWS CLI version:'
+            aws --version
+
+            DEPLOY_DIR='/home/ec2-user/$REPO_NAME'
+            echo 'Deployment directory: '\$DEPLOY_DIR''
+
+            # Prepare deployment directory
+            mkdir -p \"\$DEPLOY_DIR\"
+            echo -e '\n\033[1;34m==== 📦 Extracting code ====\033[0m'
+            tar -xzf /tmp/deploy.tar.gz -C \"\$DEPLOY_DIR\"
+            rm -f /tmp/deploy.tar.gz
+
+            cd \"\$DEPLOY_DIR\"
+
+            echo -e '\n\033[1;34m==== 🔑 Testing AWS CLI and IAM role ====\033[0m'
+            if aws sts get-caller-identity &>/dev/null; then
+              echo '✅ AWS CLI configured successfully'
+              aws sts get-caller-identity
+              echo 'Testing SSM access...'
+              if ! aws ssm get-parameter --name \"/lpvs/DB_NAME\" --with-decryption --query \"Parameter.Value\" --output text &>/dev/null; then
+                echo '❌ SSM access failed'
+                exit 1
+              fi
+              echo '✅ SSM access confirmed'
+            else
+              echo '❌ AWS CLI not configured'
+              exit 1
+            fi
+
+            echo -e '\n\033[1;34m==== 🐳 Building containers (detached) ====\033[0m'
+            sudo docker-compose -f deployment.yml build --parallel &
+            wait
+
+            echo -e '\n\033[1;34m==== 🚀 Starting services ====\033[0m'
+            sudo docker-compose -f deployment.yml down --remove-orphans --timeout 30 || true
+            sudo docker-compose -f deployment.yml up -d --remove-orphans
+
+            echo -e '\n\033[1;34m==== ⏳ Waiting for services to stabilize ====\033[0m'
+            sleep 30
+
+            echo -e '\n\033[1;34m==== 📋 Container status ====\033[0m'
+            sudo docker-compose -f deployment.yml ps
+
+            echo -e '\n\033[1;34m==== 🔍 Checking logs ====\033[0m'
+            sudo docker-compose -f deployment.yml logs --tail=20
+
+            echo -e '\n\033[1;34m==== ✅ Deployment completed ====\033[0m'
+          "
+
+      - name: 🧪 Verify deployment
+        run: |
+          REPO_NAME=$(basename $GITHUB_REPOSITORY)
+
+          ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              -o ServerAliveInterval=60 \
+              -o ServerAliveCountMax=10 \
+              ec2-user@${{ secrets.EC2_HOST }} "
+            set -euo pipefail
+
+            DEPLOY_DIR='/home/ec2-user/$REPO_NAME'
+            cd \"\$DEPLOY_DIR\"
+
+            echo -e '\n\033[1;34m==== 🧪 Running health checks ====\033[0m'
+
+            sleep 40
+
+            if ! sudo docker-compose -f deployment.yml ps | grep -q 'Up'; then
+              echo -e '\033[1;31m❌ Some containers are not running\033[0m'
+              sudo docker-compose -f deployment.yml ps
+              sudo docker-compose -f deployment.yml logs --tail=50
+              exit 1
+            fi
+
+            MAX_RETRIES=15
+            for i in \$(seq 1 \$MAX_RETRIES); do
+              if curl -s -f http://localhost:8000/healthz > /dev/null; then
+                echo -e '\033[1;32m✅ Backend health check passed!\033[0m'
+                break
+              fi
+
+              if [ \$i -eq \$MAX_RETRIES ]; then
+                echo -e '\033[1;31m❌ Backend health check failed after \$MAX_RETRIES attempts\033[0m'
+                sudo docker-compose -f deployment.yml logs backend --tail=50
+                exit 1
+              fi
+
+              echo \"Attempt \$i/\$MAX_RETRIES: Backend initializing...\"
+              sleep 10
+            done
+
+            if sudo docker-compose -f deployment.yml exec -T db pg_isready -U postgres; then
+              echo -e '\033[1;32m✅ Database connection successful!\033[0m'
+            else
+              echo -e '\033[1;31m❌ Database connection failed\033[0m'
+              sudo docker-compose -f deployment.yml logs db --tail=20
+              exit 1
+            fi
+
+            echo -e '\033[1;32m✅ All services are healthy and running!\033[0m'
+            echo -e '\n\033[1;34m==== 🎉 Deployment verified successfully ====\033[0m'
+          "
