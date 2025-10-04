@@ -2,17 +2,10 @@
 # docker compose -f development.yml build --parallel traefik backend frontend db && docker compose -f development.yml up -d --remove-orphans
 
 # Run this the first time to create the dev files:
-# docker compose -f development.yml run --rm frontend-init ; docker compose -f development.yml run --rm backend-init
+# docker compose -f development.yml --profile init run --rm frontend-init ; docker compose -f development.yml --profile init run --rm backend-init
 
-# To create each backend feature's files: APP_NAME=app docker compose -f development.yml run --rm app-init
-# To include frontend add-on on package.json: docker compose -f development.yml run --rm npm-init
-
-networks:
-  app-network:
-    driver: bridge
-  init-network:
-    driver: bridge
-
+# To create each backend feature's files: APP_NAME=app docker compose -f development.yml --profile init run --rm app-init
+# To include frontend add-on on package.json: docker compose -f development.yml --profile init run --rm npm-init
 volumes:
   db_data:
 
@@ -34,8 +27,6 @@ services:
       - "--entrypoints.web.address=:80"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-    networks:
-      - app-network
 
   backend:
     env_file: .env
@@ -64,8 +55,6 @@ services:
       - DJANGO_SETTINGS_MODULE=backend.settings
       - AUTO_MAKEMIGRATIONS=true
     restart: on-failure
-    networks:
-      - app-network
 
   frontend:
     build:
@@ -90,8 +79,6 @@ services:
       - "traefik.http.routers.frontend.entrypoints=web"
       - "traefik.http.services.frontend.loadbalancer.server.port=3000"
     restart: on-failure
-    networks:
-      - app-network
 
   db:
     image: postgres:16
@@ -105,12 +92,11 @@ services:
       timeout: 3s
       retries: 10
     restart: always
-    networks:
-      - app-network
 
 
-# Initiation Services
+# Initiation Services - these only run when explicitly called
   frontend-init:
+    profiles: ["init"]
     image: node:20
     volumes:
       - ./frontend:/app
@@ -123,10 +109,9 @@ services:
         if [ -f ../Dockerfile.backup ]; then mv ../Dockerfile.backup ./Dockerfile; fi &&
         npm install
       "
-    networks:
-      - init-network
 
   npm-init:
+    profiles: ["init"]
     image: node:18-slim
     working_dir: /app
     volumes:
@@ -158,10 +143,9 @@ services:
 
         echo "✅ package.json now strictly matches /deps/npm.txt"
       '
-    networks:
-      - init-network
 
   backend-init:
+    profiles: ["init"]
     image: python:3.11-slim
     volumes:
       - ./backend:/app
@@ -223,10 +207,9 @@ services:
         \n        'rest_framework.permissions.IsAuthenticatedOrReadOnly',\
         \n    ]" backend/settings.py
       '
-    networks:
-      - init-network
 
   app-init:
+    profiles: ["init"]
     image: python:3.11-slim
     volumes:
       - ./backend:/app
@@ -241,5 +224,3 @@ services:
       "
     environment:
       - APP_NAME=app
-    networks:
-      - init-network

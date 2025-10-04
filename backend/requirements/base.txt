@@ -1,0 +1,23 @@
+# compose/requirements/base.txt
+
+# Django core dependencies
+Django==4.2.7
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-environ==0.11.2
+django-redis==5.2.0
+dj-database-url
+
+# Database - using pre-built binary
+psycopg2-binary==2.9.9
+
+# Static files and caching
+whitenoise==6.6.0
+redis==5.0.1
+hiredis==2.2.3
+
+# Payment processing
+stripe==7.8.2
+
+# Other utilities
+python-decouple==3.8
