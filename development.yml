@@ -1,34 +1,47 @@
-# development.yml
-# Run with: docker compose -f development.yml build --parallel && docker compose -f development.yml up -d --remove-orphans
+# Run website:
+# docker compose -f development.yml build --parallel traefik backend frontend db && docker compose -f development.yml up -d --remove-orphans
+
+# Run this the first time to create the dev files:
+# docker compose -f development.yml run --rm frontend-init ; docker compose -f development.yml run --rm backend-init
+
+# To create each backend feature's files: APP_NAME=app docker compose -f development.yml run --rm app-init
+# To include frontend add-on on package.json: docker compose -f development.yml run --rm npm-init
+
+networks:
+  app-network:
+    driver: bridge
+  init-network:
+    driver: bridge
+
+volumes:
+  db_data:
 
 services:
   traefik:
     image: traefik:v3.5
     ports:
       - "80:80"
-      - "443:443"
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
     command:
       - "--log.level=INFO"
-      - "--accesslog=false"
+      - "--accesslog=true"
       - "--ping=true"
       - "--api.dashboard=true"
       - "--api.insecure=true"
       - "--entrypoints.web.address=:80"
-      # Only add redirection when TRAEFIK_FORCE_HTTPS is true. This uses Traefik dynamic-style entrypoint configuration,
-      # but since compose can't add commands conditionally, we include both flags and rely on proxy rule in routers below.
-      - "--entrypoints.web-secure.address=:443"
-      - "--entrypoints.web-secure.http.tls=true"
+      - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+    networks:
+      - app-network
 
   backend:
     env_file: .env
     build:
       context: .
-      dockerfile: ./compose/development/Dockerfile.backend
+      dockerfile: backend/Dockerfile.development
     volumes:
       - ./backend:/app:delegated
     depends_on:
@@ -42,11 +55,8 @@ services:
       start_period: 10s
     labels:
       - "traefik.enable=true"
-      # Explicit path-based router for backend: higher priority to ensure /api, /admin etc. go to backend.
-      - "traefik.http.routers.backend.rule=(PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/media`))"
-      - "traefik.http.routers.backend.entrypoints=web,web-secure"
-      - "traefik.http.routers.backend.priority=20"
-      - "traefik.http.routers.backend.tls=true"
+      - "traefik.http.routers.backend.rule=Host(`localhost`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/media`))"
+      - "traefik.http.routers.backend.entrypoints=web"
       - "traefik.http.services.backend.loadbalancer.server.port=8000"
     environment:
       - PYTHONPATH=/app
@@ -54,11 +64,13 @@ services:
       - DJANGO_SETTINGS_MODULE=backend.settings
       - AUTO_MAKEMIGRATIONS=true
     restart: on-failure
+    networks:
+      - app-network
 
   frontend:
     build:
       context: .
-      dockerfile: ./compose/development/Dockerfile.frontend
+      dockerfile: frontend/Dockerfile
     volumes:
       - ./frontend:/app:delegated
       - /app/node_modules
@@ -67,34 +79,165 @@ services:
         condition: service_healthy
     environment:
       - NODE_ENV=development
-      - NEXT_PUBLIC_API_URL=https://localhost/api
+      - NEXT_PUBLIC_API_URL=http://localhost/api
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
       - HOST=0.0.0.0
       - PORT=3000
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=Host(`localhost`) && PathPrefix(`/`)"
-      - "traefik.http.routers.frontend.entrypoints=web,web-secure"
-      - "traefik.http.routers.frontend.priority=10"
-      - "traefik.http.routers.frontend.tls=false"
+      - "traefik.http.routers.frontend.rule=Host(`localhost`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
       - "traefik.http.services.frontend.loadbalancer.server.port=3000"
     restart: on-failure
+    networks:
+      - app-network
 
   db:
     image: postgres:16
-    environment:
-      POSTGRES_DB: ${DB_NAME:-postgres}
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
       - db_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${DB_USER:-postgres}"]
       interval: 5s
       timeout: 3s
       retries: 10
     restart: always
+    networks:
+      - app-network
 
-volumes:
-  db_data:
+
+# Initiation Services
+  frontend-init:
+    image: node:20
+    volumes:
+      - ./frontend:/app
+    working_dir: /app
+    command: >
+      sh -c "
+        npm install -g npm@latest &&
+        npx create-next-app@latest . &&
+        npm install
+      "
+    networks:
+      - init-network
+
+  npm-init:
+    image: node:18-slim
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - ./compose/requirements/npm.txt:/deps/npm.txt:ro
+    command: >
+      sh -c '
+        apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/* &&
+        echo "📦 Syncing npm dependencies with /deps/npm.txt..." &&
+
+        wanted_deps=$(grep -v "^\s*#" /deps/npm.txt | sed "/^\s*$/d")
+
+        for dep in $$wanted_deps; do
+          if ! grep -q "\"$$dep\"" package.json; then
+            echo "Installing $$dep..."
+            npm install "$$dep" --save --legacy-peer-deps
+          else
+            echo "$$dep already present, skipping."
+          fi
+        done
+
+        current_deps=$(jq -r ".dependencies | keys[]" package.json)
+        for dep in $$current_deps; do
+          if ! echo "$$wanted_deps" | grep -qx "$$dep"; then
+            echo "Removing extra dependency $$dep..."
+            npm uninstall "$$dep" --save
+          fi
+        done
+
+        echo "✅ package.json now strictly matches /deps/npm.txt"
+      '
+    networks:
+      - init-network
+
+  backend-init:
+    image: python:3.11-slim
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: >
+      sh -c '
+        apt-get update &&
+        apt-get install -y sed &&
+        pip install --upgrade pip &&
+        pip install --upgrade django &&
+        django-admin startproject backend . &&
+        sed -i "s/from pathlib import Path/import os\\nfrom pathlib import Path/" backend/settings.py &&
+        sed -i "s/^SECRET_KEY = .*/SECRET_KEY = os.getenv('\''DJANGO_SECRET_KEY'\'', '\''dev-secret-key-for-testing-only-not-for-production'\'')/" backend/settings.py &&
+        sed -i "s/^DEBUG = .*/DEBUG = os.getenv('\''DEBUG'\'', '\''False'\'').lower() in ('\''true'\'', '\''1'\'', '\''yes'\'')/" backend/settings.py &&
+        sed -i "/ALLOWED_HOSTS = \[\]/c\\hosts = os.getenv('\''HOSTS'\'', '\''localhost,127.0.0.1,0.0.0.0'\'')\\nALLOWED_HOSTS = [host.strip() for host in hosts.split('\'', '\'') if host.strip()]" backend/settings.py &&
+        sed -i "/INSTALLED_APPS = \[/a\\    '\''corsheaders'\'',\\n    '\''rest_framework'\'',\\n    '\''rest_framework.authtoken'\'',\\n    '\''authentication'\'',\\n    '\''donations'\'',\\n    '\''medicine'\'',\\n    '\''beneficiary'\''," backend/settings.py &&
+        sed -i "/MIDDLEWARE = \[/a\\    '\''whitenoise.middleware.WhiteNoiseMiddleware'\'',\\n    '\''corsheaders.middleware.CorsMiddleware'\'',\\n    '\''django.middleware.locale.LocaleMiddleware'\''," backend/settings.py &&
+        sed -i "s/^LANGUAGE_CODE = .*/LANGUAGE_CODE = '\''es-mx'\''/" backend/settings.py &&
+        sed -i "/LANGUAGE_CODE = '\''es-mx'\''/a\\LANGUAGES = [\\n    ('\''en'\'', '\''English'\''),\\n    ('\''es'\'', '\''Spanish'\''),\\n]" backend/settings.py &&
+        sed -i "/# Database/,+10d" backend/settings.py &&
+        printf "\\n# Database\\nDATABASES = {\\n    'default': {\\n        'ENGINE': 'django.db.backends.postgresql',\\n        'NAME': os.getenv('"'"'DB_NAME'"'"'),\\n        'USER': os.getenv('"'"'DB_USER'"'"'),\\n        'PASSWORD': os.getenv('"'"'DB_PASSWORD'"'"'),\\n        'HOST': os.getenv('"'"'DB_HOST'"'"'),\\n        'PORT': os.getenv('"'"'DB_PORT'"'"'),\\n    }\\n}\\n" >> backend/settings.py &&
+        echo "\\nSTATIC_URL = '/static/'" >> backend/settings.py &&
+        echo "STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')" >> backend/settings.py &&
+        echo "MEDIA_URL = '/media/'" >> backend/settings.py &&
+        echo "MEDIA_ROOT = os.path.join(BASE_DIR, 'media')" >> backend/settings.py &&
+        echo "STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'" >> backend/settings.py &&
+        echo "CORS_ALLOW_CREDENTIALS = True" >> backend/settings.py &&
+        echo "REST_FRAMEWORK = {\\n    'DEFAULT_AUTHENTICATION_CLASSES': [\\n        'rest_framework.authentication.TokenAuthentication',\\n        'rest_framework.authentication.SessionAuthentication',\\n    ],\\n}" >> backend/settings.py &&
+        sed -i "$ a \
+        if DEBUG:\
+        \n    CORS_ALLOW_ALL_ORIGINS = True\
+        \n    CORS_ALLOWED_ORIGINS = [\
+        \n        'http://localhost:3000',\
+        \n        'https://localhost:3000',\
+        \n        'http://127.0.0.1:3000',\
+        \n        'https://127.0.0.1:3000',\
+        \n        'http://frontend:3000',\
+        \n        'https://frontend:3000',\
+        \n    ]\
+        \n    CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS + [\
+        \n        'http://localhost:8000',\
+        \n        'https://localhost:8000',\
+        \n        'http://localhost:80',\
+        \n        'https://localhost:443',\
+        \n        'http://backend:8000',\
+        \n        'https://backend:8000',\
+        \n        'http://localhost',\
+        \n        'https://localhost',\
+        \n    ]\
+        \n    REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'] = [\
+        \n        'rest_framework.permissions.AllowAny',\
+        \n    ]\
+        else:\
+        \n    CORS_ALLOWED_ORIGINS = [\
+        \n        'https://yourproductiondomain.com',\
+        \n    ]\
+        \n    CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS\
+        \n    REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'] = [\
+        \n        'rest_framework.permissions.IsAuthenticatedOrReadOnly',\
+        \n    ]" backend/settings.py
+      '
+    networks:
+      - init-network
+
+  app-init:
+    image: python:3.11-slim
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: >
+      sh -c "
+      apt-get update &&
+      apt-get install -y sed &&
+      pip install --upgrade pip &&
+      pip install django python-decouple djangorestframework django-cors-headers &&
+      django-admin startapp ${APP_NAME}
+      "
+    environment:
+      - APP_NAME=app
+    networks:
+      - init-network

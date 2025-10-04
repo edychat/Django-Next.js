@@ -1,0 +1,65 @@
+# backend/Dockerfile.deployment
+# ---------- Build Stage ----------
+FROM python:3.12.5-slim-bookworm AS python-build-stage
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=off
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY requirements/ ./requirements/
+RUN pip wheel --wheel-dir /wheels -r requirements/deployment.txt
+
+# ---------- Runtime Stage ----------
+FROM python:3.12.5-slim-bookworm AS python-run-stage
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev netcat-openbsd && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-build-stage /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* && rm -rf /wheels
+
+RUN addgroup --system django && adduser --system --ingroup django django
+COPY --chown=django:django . /app
+RUN chown -R django:django /app && chmod -R 755 /app
+
+# Build args for superuser
+ARG DJANGO_SUPERUSER_USERNAME
+ARG DJANGO_SUPERUSER_EMAIL
+ARG DJANGO_SUPERUSER_PASSWORD
+
+# Set environment variables for runtime
+ENV DJANGO_SUPERUSER_USERNAME=$DJANGO_SUPERUSER_USERNAME
+ENV DJANGO_SUPERUSER_EMAIL=$DJANGO_SUPERUSER_EMAIL
+ENV DJANGO_SUPERUSER_PASSWORD=$DJANGO_SUPERUSER_PASSWORD
+
+# Entrypoint
+RUN cat <<'EOF' > /entrypoint.sh
+#!/bin/sh
+set -e
+
+echo "🚀 Starting Django production container"
+
+if [ -f manage.py ]; then
+    python manage.py migrate --noinput
+    python manage.py collectstatic --noinput --clear
+
+    # Create superuser if not exists
+    if [ -n "$DJANGO_SUPERUSER_USERNAME" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ]; then
+        python manage.py shell << END
+from django.contrib.auth import get_user_model
+User = get_user_model()
+if not User.objects.filter(username='$DJANGO_SUPERUSER_USERNAME').exists():
+    User.objects.create_superuser('$DJANGO_SUPERUSER_USERNAME', '$DJANGO_SUPERUSER_EMAIL', '$DJANGO_SUPERUSER_PASSWORD')
+END
+    fi
+fi
+
+exec "$@"
+EOF
+
+RUN chmod +x /entrypoint.sh
+USER django
+
+CMD sh -c "/entrypoint.sh gunicorn backend.wsgi:application --bind 0.0.0.0:\${PORT:-8000} --workers 3"

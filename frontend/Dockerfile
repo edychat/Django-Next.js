@@ -1,4 +1,4 @@
-# compose/development/Dockerfile.frontend
+# frontend/Dockerfile
 FROM node:20-slim
 
 WORKDIR /app
