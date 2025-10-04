@@ -118,7 +118,9 @@ services:
     command: >
       sh -c "
         npm install -g npm@latest &&
-        npx create-next-app@latest . --use-npm --overwrite &&
+        if [ -f Dockerfile ]; then mv Dockerfile ../Dockerfile.backup; fi &&
+        npx create-next-app@latest . &&
+        if [ -f ../Dockerfile.backup ]; then mv ../Dockerfile.backup ./Dockerfile; fi &&
         npm install
       "
     networks:
