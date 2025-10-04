@@ -118,7 +118,7 @@ services:
     command: >
       sh -c "
         npm install -g npm@latest &&
-        npx create-next-app@latest . &&
+        npx create-next-app@latest . --use-npm --overwrite &&
         npm install
       "
     networks:
