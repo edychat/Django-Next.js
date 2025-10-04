@@ -85,7 +85,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # Auto-generate migrations in dev if there are pending model changes
     if [ "${AUTO_MAKEMIGRATIONS:-true}" = "true" ]; then
         echo "🛠️  Generating migrations if needed..."
-        python manage.py makemigrations beneficiary --noinput || true
         python manage.py makemigrations --noinput
     fi
 
