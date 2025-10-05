@@ -1,11 +1,12 @@
 # Run website:
-# docker compose -f development.yml build --parallel traefik backend frontend db && docker compose -f development.yml up -d --remove-orphans
+# docker compose -f development.yml build --parallel && docker compose -f development.yml up -d --remove-orphans
 
 # Run this the first time to create the dev files:
 # docker compose -f development.yml --profile init run --rm frontend-init ; docker compose -f development.yml --profile init run --rm backend-init
 
-# To create each backend feature's files: APP_NAME=app docker compose -f development.yml --profile init run --rm app-init
+# To create each backend feature's files: APP_NAME=app docker compose --profile init -f development.yml run --rm app-init
 # To include frontend add-on on package.json: docker compose -f development.yml --profile init run --rm npm-init
+
 volumes:
   db_data:
 
@@ -54,7 +55,7 @@ services:
       - DEBUG=True
       - DJANGO_SETTINGS_MODULE=backend.settings
       - AUTO_MAKEMIGRATIONS=true
-    restart: on-failure
+    restart: unless-stopped
 
   frontend:
     build:

@@ -1,4 +1,4 @@
-# backend/Dockerfile.development
+# backend/Dockerfile.backend
 # ---------- Build Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-build-stage
 
@@ -7,124 +7,125 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=off
 
-    # Install build deps in one layer and keep apt lists minimal
-    RUN apt-get update \
-     && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates \
-     && rm -rf /var/lib/apt/lists/*
+# Install build deps in one layer and keep apt lists minimal
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-    # Copy only requirements first to leverage layer caching
-    COPY backend/requirements/ ./requirements/
-    # Build wheels (faster installs in runtime stage)
-    RUN pip wheel --wheel-dir /wheels -r requirements/development.txt
+# Copy only requirements first to leverage layer caching
+COPY backend/requirements/ ./requirements/
+# Build wheels (faster installs in runtime stage)
+RUN pip wheel --wheel-dir /wheels -r requirements/development.txt
 
-    # ---------- Runtime Stage ----------
-    FROM python:3.12.5-slim-bookworm AS python-run-stage
+# ---------- Runtime Stage ----------
+FROM python:3.12.5-slim-bookworm AS python-run-stage
 
-    WORKDIR /app
-    ENV PYTHONDONTWRITEBYTECODE=1 \
-        PYTHONUNBUFFERED=1 \
-        PYTHONPATH=/app \
-        PIP_NO_CACHE_DIR=1
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1
 
-    # Minimal runtime deps
-    RUN apt-get update \
-     && apt-get install -y --no-install-recommends libpq-dev gettext curl netcat-openbsd rsync \
-     && rm -rf /var/lib/apt/lists/*
+# Minimal runtime deps
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpq-dev gettext curl netcat-openbsd rsync \
+ && rm -rf /var/lib/apt/lists/*
 
-    # Copy wheels and install (no network at runtime; faster)
-    COPY --from=python-build-stage /wheels /wheels
-    RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
-    && rm -rf /wheels
+# Copy wheels and install (no network at runtime; faster)
+COPY --from=python-build-stage /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+&& rm -rf /wheels
 
-    # Create non-root user for safety
-    RUN addgroup --system django && adduser --system --ingroup django django
+# Create non-root user for safety
+RUN addgroup --system django && adduser --system --ingroup django django
 
-    # Copy project source with ownership for the django user
-    COPY --chown=django:django . /app
+# Copy project source with ownership for the django user
+COPY --chown=django:django . /app
 
-    # Ensure django user has write permissions to the app directory
-    RUN chown -R django:django /app && \
-        chmod -R 755 /app
+# Ensure django user has write permissions to the app directory
+RUN chown -R django:django /app && \
+    chmod -R 755 /app
 
-    # Entrypoint
-    RUN cat > /entrypoint.sh <<'EOF'
-    #!/bin/sh
-    set -e
+# Entrypoint
+RUN cat > /entrypoint.sh <<'EOF'
+#!/bin/sh
+set -e
 
-    DB_HOST=${DB_HOST:-db}
-    DB_PORT=${DB_PORT:-5432}
-    MAX_WAIT=${MAX_WAIT:-60}  # seconds
-    SLEEP=0.5
-    WAITED=0
+DB_HOST=${DB_HOST:-db}
+DB_PORT=${DB_PORT:-5432}
+MAX_WAIT=${MAX_WAIT:-60}  # seconds
+SLEEP=0.5
+WAITED=0
 
-    echo "🚀 Starting Django dev container"
+echo "🚀 Starting Django dev container"
 
-    # Wait for DB (with timeout)
-    until nc -z $DB_HOST $DB_PORT; do
-      if [ "$(echo "$WAITED >= $MAX_WAIT" | bc)" -eq 1 ] 2>/dev/null; then
-        echo "❌ Timeout waiting for DB ($DB_HOST:$DB_PORT)"
-        exit 1
-      fi
-      sleep $SLEEP
-      WAITED=$(awk "BEGIN {print $WAITED + $SLEEP}")
-    done
-    echo "✅ Database is reachable"
+# Wait for DB (with timeout)
+until nc -z $DB_HOST $DB_PORT; do
+  if [ "$(echo "$WAITED >= $MAX_WAIT" | bc)" -eq 1 ] 2>/dev/null; then
+    echo "❌ Timeout waiting for DB ($DB_HOST:$DB_PORT)"
+    exit 1
+  fi
+  sleep $SLEEP
+  WAITED=$(awk "BEGIN {print $WAITED + $SLEEP}")
+done
+echo "✅ Database is reachable"
 
-    echo "📁 Ensuring migrations directories exist for all Django apps..."
-    find /app -type f -name "models.py" | while read -r models_file; do
-      app_dir="$(dirname "$models_file")"
-      migrations_dir="$app_dir/migrations"
-      if [ ! -d "$migrations_dir" ]; then
-        echo "📂 Creating $migrations_dir"
-        mkdir -p "$migrations_dir"
-        touch "$migrations_dir/__init__.py"
-        chown -R django:django "$migrations_dir"
-      fi
-    done
+echo "📁 Ensuring migrations directories exist for all Django apps..."
+find /app -type f -name "models.py" | while read -r models_file; do
+  app_dir="$(dirname "$models_file")"
+  migrations_dir="$app_dir/migrations"
+  if [ ! -d "$migrations_dir" ]; then
+    echo "📂 Creating $migrations_dir"
+    mkdir -p "$migrations_dir"
+    touch "$migrations_dir/__init__.py"
+    chown -R django:django "$migrations_dir"
+  fi
+done
 
-    # Auto-generate migrations in dev if there are pending model changes
-    if [ "${AUTO_MAKEMIGRATIONS:-true}" = "true" ]; then
-        echo "🛠️  Generating migrations if needed..."
-        python manage.py makemigrations --noinput
-    fi
+# Auto-generate migrations in dev if there are pending model changes
+if [ "${AUTO_MAKEMIGRATIONS:-true}" = "true" ]; then
+    echo "🛠️  Generating migrations if needed..."
+    python manage.py makemigrations beneficiary --noinput || true
+    python manage.py makemigrations --noinput
+fi
 
-    # Run migrations
-    if [ -f manage.py ]; then
-      echo "📦 Running migrations"
-      python manage.py migrate --noinput || true
-      echo "📁 Collecting static files"
-      python manage.py collectstatic --noinput --clear >/dev/null 2>&1 || true
-    fi
+# Run migrations
+if [ -f manage.py ]; then
+  echo "📦 Running migrations"
+  python manage.py migrate --noinput || true
+  echo "📁 Collecting static files"
+  python manage.py collectstatic --noinput --clear >/dev/null 2>&1 || true
+fi
 
-    echo "🔄 Syncing migrations back to host..."
-    rsync -a --chown=$(id -u):$(id -g) /app/backend/ /app/backend/
+echo "🔄 Syncing migrations back to host..."
+rsync -a --chown=$(id -u):$(id -g) /app/backend/ /app/backend/
 
-    # Create superuser if env supplied
-    if [ -n "$DJANGO_SUPERUSER_USERNAME" ]; then
-      echo "👤 Ensuring superuser exists"
-      python - <<'PY'
-    import os
-    import django
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', os.getenv('DJANGO_SETTINGS_MODULE', 'backend.settings'))
-    django.setup()
-    from django.contrib.auth import get_user_model
-    User = get_user_model()
-    username = os.getenv('DJANGO_SUPERUSER_USERNAME')
-    email = os.getenv('DJANGO_SUPERUSER_EMAIL', 'admin@example.com')
-    password = os.getenv('DJANGO_SUPERUSER_PASSWORD', "admin")
-    if username and not User.objects.filter(username=username).exists():
-        User.objects.create_superuser(username, email, password)
-        print(f"✅ Created superuser: {username}")
-    else:
-        print("ℹ️ Superuser already exists or username not provided")
-    PY
-    fi
+# Create superuser if env supplied
+if [ -n "$DJANGO_SUPERUSER_USERNAME" ]; then
+  echo "👤 Ensuring superuser exists"
+  python - <<'PY'
+import os
+import django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', os.getenv('DJANGO_SETTINGS_MODULE', 'backend.settings'))
+django.setup()
+from django.contrib.auth import get_user_model
+User = get_user_model()
+username = os.getenv('DJANGO_SUPERUSER_USERNAME')
+email = os.getenv('DJANGO_SUPERUSER_EMAIL', 'admin@example.com')
+password = os.getenv('DJANGO_SUPERUSER_PASSWORD', "admin")
+if username and not User.objects.filter(username=username).exists():
+    User.objects.create_superuser(username, email, password)
+    print(f"✅ Created superuser: {username}")
+else:
+    print("ℹ️ Superuser already exists or username not provided")
+PY
+fi
 
-    exec "$@"
-    EOF
+exec "$@"
+EOF
 
-    RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-    USER django
-    ENTRYPOINT ["/entrypoint.sh"]
-    CMD ["python", "manage.py", "runserver", "0.0.0.0:8000", "--verbosity", "0"]
+USER django
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000", "--verbosity", "0"]
