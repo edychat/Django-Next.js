@@ -28,7 +28,6 @@ services:
       - "--entrypoints.web.address=:80"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-
   backend:
     env_file: .env
     build:
@@ -40,7 +39,7 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
       interval: 1m
       timeout: 3s
       retries: 10
@@ -49,14 +48,10 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.backend.rule=Host(`localhost`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/media`))"
       - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.middlewares.strip-api-prefix.stripprefix.prefixes=/api"
+      - "traefik.http.routers.backend.middlewares=strip-api-prefix"
       - "traefik.http.services.backend.loadbalancer.server.port=8000"
-    environment:
-      - PYTHONPATH=/app
-      - DEBUG=True
-      - DJANGO_SETTINGS_MODULE=backend.settings
-      - AUTO_MAKEMIGRATIONS=true
     restart: unless-stopped
-
   frontend:
     build:
       context: .
@@ -67,11 +62,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    environment:
-      - NODE_ENV=development
-      - NEXT_PUBLIC_API_URL=http://localhost/api
-      - HOST=0.0.0.0
-      - PORT=3000
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.frontend.rule=Host(`localhost`)"
@@ -85,19 +75,18 @@ services:
         reservations:
           memory: "256M"
     restart: on-failure
-
   db:
     image: postgres:16
     volumes:
       - db_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_HOST_AUTH_METHOD=trust
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${DB_USER:-postgres}"]
       interval: 5s
       timeout: 3s
       retries: 10
     restart: always
+
+
 
 
 # Initialization ------------------

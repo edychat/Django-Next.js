@@ -26,13 +26,13 @@ RUN chown -R django:django /app && chmod -R 755 /app
 
 # Build args for superuser
 ARG DJANGO_SUPERUSER_USERNAME
-ARG DJANGO_SUPERUSER_EMAIL
 ARG DJANGO_SUPERUSER_PASSWORD
+ARG DOMAIN
 
 # Set environment variables for runtime
 ENV DJANGO_SUPERUSER_USERNAME=$DJANGO_SUPERUSER_USERNAME
-ENV DJANGO_SUPERUSER_EMAIL=$DJANGO_SUPERUSER_EMAIL
 ENV DJANGO_SUPERUSER_PASSWORD=$DJANGO_SUPERUSER_PASSWORD
+ENV DOMAIN=$DOMAIN
 
 # Entrypoint
 RUN cat <<'EOF' > /entrypoint.sh
@@ -46,13 +46,24 @@ if [ -f manage.py ]; then
     python manage.py collectstatic --noinput --clear
 
     # Create superuser if not exists
-    if [ -n "$DJANGO_SUPERUSER_USERNAME" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ]; then
+    if [ -n "$DJANGO_SUPERUSER_USERNAME" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ] && [ -n "$DOMAIN" ]; then
         python manage.py shell << END
+import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-if not User.objects.filter(username='$DJANGO_SUPERUSER_USERNAME').exists():
-    User.objects.create_superuser('$DJANGO_SUPERUSER_USERNAME', '$DJANGO_SUPERUSER_EMAIL', '$DJANGO_SUPERUSER_PASSWORD')
+
+username = os.getenv('DJANGO_SUPERUSER_USERNAME')
+domain = os.getenv('DOMAIN')
+email = f'{username}@{domain}'
+
+if not User.objects.filter(username=username).exists():
+    User.objects.create_superuser(username, email, os.getenv('DJANGO_SUPERUSER_PASSWORD'))
+    print(f"Superuser created: {username} with email: {email}")
+else:
+    print(f"Superuser already exists: {username}")
 END
+    else
+        echo "Missing required environment variables for superuser creation"
     fi
 fi
 

@@ -9,7 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install build deps in one layer and keep apt lists minimal
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates \
+ && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first to leverage layer caching
@@ -28,13 +32,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Minimal runtime deps
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq-dev gettext curl netcat-openbsd rsync \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gettext \
+    curl \
+    netcat-openbsd \
+    postgresql-client \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get clean
 
 # Copy wheels and install (no network at runtime; faster)
 COPY --from=python-build-stage /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
-&& rm -rf /wheels
+ && rm -rf /wheels
 
 # Create non-root user for safety
 RUN addgroup --system django && adduser --system --ingroup django django
@@ -46,82 +56,135 @@ COPY --chown=django:django . /app
 RUN chown -R django:django /app && \
     chmod -R 755 /app
 
-# Entrypoint
+# Set hardcoded development database credentials
+ENV DB_HOST=db \
+    DB_PORT=5432 \
+    DB_NAME=postgres \
+    DB_USER=postgres \
+    DB_PASSWORD=devpassword123 \
+    DJANGO_SETTINGS_MODULE=backend.settings
+
+# Create entrypoint script with hardcoded credentials
 RUN cat > /entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
 
+# Use hardcoded environment variables from Dockerfile
 DB_HOST=${DB_HOST:-db}
 DB_PORT=${DB_PORT:-5432}
-MAX_WAIT=${MAX_WAIT:-60}  # seconds
-SLEEP=0.5
+DB_NAME=${DB_NAME:-postgres}
+DB_USER=${DB_USER:-postgres}
+DB_PASSWORD=${DB_PASSWORD:-postgres}
+MAX_WAIT=${MAX_WAIT:-60}
+SLEEP=2
 WAITED=0
 
 echo "🚀 Starting Django dev container"
 
-# Wait for DB (with timeout)
-until nc -z $DB_HOST $DB_PORT; do
-  if [ "$(echo "$WAITED >= $MAX_WAIT" | bc)" -eq 1 ] 2>/dev/null; then
-    echo "❌ Timeout waiting for DB ($DB_HOST:$DB_PORT)"
+# Wait for DB with hardcoded credentials
+echo "⏳ Waiting for database at $DB_HOST:$DB_PORT..."
+while [ $WAITED -lt $MAX_WAIT ]; do
+    # Test basic connectivity first
+    if nc -z -w 1 "$DB_HOST" "$DB_PORT" 2>/dev/null; then
+        # Test authentication with actual PostgreSQL connection
+        if PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
+            echo "✅ Database is reachable and authentication successful"
+            break
+        else
+            echo "⚠️ Database reachable but authentication failed - checking if it's initializing..."
+        fi
+    fi
+
+    echo "⏰ Waiting for database... ($((WAITED + SLEEP))s/${MAX_WAIT}s)"
+    sleep $SLEEP
+    WAITED=$((WAITED + SLEEP))
+done
+
+if [ $WAITED -ge $MAX_WAIT ]; then
+    echo "❌ Timeout waiting for DB ($DB_HOST:$DB_PORT) with successful authentication"
+    echo "   Check if database container is running and credentials match"
     exit 1
-  fi
-  sleep $SLEEP
-  WAITED=$(awk "BEGIN {print $WAITED + $SLEEP}")
-done
-echo "✅ Database is reachable"
+fi
 
-echo "📁 Ensuring migrations directories exist for all Django apps..."
-find /app -type f -name "models.py" | while read -r models_file; do
-  app_dir="$(dirname "$models_file")"
-  migrations_dir="$app_dir/migrations"
-  if [ ! -d "$migrations_dir" ]; then
-    echo "📂 Creating $migrations_dir"
-    mkdir -p "$migrations_dir"
-    touch "$migrations_dir/__init__.py"
-    chown -R django:django "$migrations_dir"
-  fi
+# Create migration directories for all apps with models
+echo "📁 Ensuring migrations directories exist..."
+find /app -name "models.py" -type f | while read -r models_file; do
+    app_dir=$(dirname "$models_file")
+    migrations_dir="$app_dir/migrations"
+    if [ ! -d "$migrations_dir" ]; then
+        echo "📂 Creating $migrations_dir"
+        mkdir -p "$migrations_dir"
+        echo "# Created by Docker entrypoint" > "$migrations_dir/__init__.py"
+    fi
 done
 
-# Auto-generate migrations in dev if there are pending model changes
+# Auto-generate migrations only for apps that need it
 if [ "${AUTO_MAKEMIGRATIONS:-true}" = "true" ]; then
-    echo "🛠️  Generating migrations if needed..."
-    python manage.py makemigrations beneficiary --noinput || true
-    python manage.py makemigrations --noinput
+    echo "🛠️ Checking for migration changes..."
+    # Check if there are model changes without migrations
+    if python manage.py makemigrations --dry-run --noinput 2>/dev/null | grep -q "No changes detected"; then
+        echo "✅ No migration changes needed"
+    else
+        echo "📝 Generating migrations..."
+        python manage.py makemigrations --noinput || echo "⚠️ Some migrations failed, continuing..."
+    fi
 fi
 
 # Run migrations
 if [ -f manage.py ]; then
-  echo "📦 Running migrations"
-  python manage.py migrate --noinput || true
-  echo "📁 Collecting static files"
-  python manage.py collectstatic --noinput --clear >/dev/null 2>&1 || true
+    echo "📦 Applying migrations..."
+    python manage.py migrate --noinput || echo "⚠️ Some migrations failed, continuing..."
+
+    echo "📁 Collecting static files..."
+    python manage.py collectstatic --noinput --clear || echo "⚠️ Static collection failed, continuing..."
 fi
 
-echo "🔄 Syncing migrations back to host..."
-rsync -a --chown=$(id -u):$(id -g) /app/backend/ /app/backend/
-
-# Create superuser if env supplied
+# Create superuser with proper error handling
 if [ -n "$DJANGO_SUPERUSER_USERNAME" ]; then
-  echo "👤 Ensuring superuser exists"
-  python - <<PY
+    echo "👤 Ensuring superuser exists..."
+    python - <<PY
 import os
 import django
+import sys
+
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', os.getenv('DJANGO_SETTINGS_MODULE', 'backend.settings'))
-django.setup()
+
+try:
+    django.setup()
+except django.core.exceptions.ImproperlyConfigured as e:
+    print(f"❌ Django not properly configured: {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ Error setting up Django: {e}")
+    sys.exit(1)
+
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError, OperationalError
+
 User = get_user_model()
 username = os.getenv('DJANGO_SUPERUSER_USERNAME')
 domain = os.getenv('DOMAIN', 'example.com')
-email = os.getenv('DJANGO_SUPERUSER_EMAIL', f'email@{domain}')
-password = os.getenv('DJANGO_SUPERUSER_PASSWORD', "admin")
-if username and not User.objects.filter(username=username).exists():
-    User.objects.create_superuser(username, email, password)
-    print(f"✅ Created superuser: {username} with email: {email}")
-else:
-    print("ℹ️ Superuser already exists or username not provided")
+email = os.getenv('DJANGO_SUPERUSER_EMAIL', f'{username}@{domain}')
+password = os.getenv('DJANGO_SUPERUSER_PASSWORD', 'admin')
+
+try:
+    if username and not User.objects.filter(username=username).exists():
+        User.objects.create_superuser(username, email, password)
+        print(f"✅ Created superuser: {username} with email: {email}")
+    elif User.objects.filter(username=username).exists():
+        print(f"ℹ️ Superuser already exists: {username}")
+    else:
+        print("⚠️ Superuser username not provided")
+except DatabaseError as e:
+    print(f"❌ Database error creating superuser: {e}")
+except OperationalError as e:
+    print(f"❌ Database operational error: {e}")
+except Exception as e:
+    print(f"❌ Unexpected error creating superuser: {e}")
 PY
 fi
 
+echo "🎯 Development environment ready!"
 exec "$@"
 EOF
 
@@ -129,4 +192,4 @@ RUN chmod +x /entrypoint.sh
 
 USER django
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000", "--verbosity", "0"]
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
