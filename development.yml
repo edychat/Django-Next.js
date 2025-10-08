@@ -4,7 +4,7 @@
 # Run this the first time to create the dev files:
 # docker compose -f development.yml --profile init run --rm frontend-init ; docker compose -f development.yml --profile init run --rm backend-init
 
-# To create each backend feature's files: APP_NAME=app docker compose --profile init -f development.yml run --rm app-init
+# To create each backend feature's files: APP_NAME=beneficiary docker compose --profile init -f development.yml run --rm app-init
 # To include frontend add-on on package.json: docker compose -f development.yml --profile init run --rm npm-init
 
 volumes:
@@ -41,7 +41,7 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
-      interval: 5s
+      interval: 1m
       timeout: 3s
       retries: 10
       start_period: 10s
@@ -70,8 +70,6 @@ services:
     environment:
       - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost/api
-      - CHOKIDAR_USEPOLLING=true
-      - WATCHPACK_POLLING=true
       - HOST=0.0.0.0
       - PORT=3000
     labels:
@@ -79,6 +77,13 @@ services:
       - "traefik.http.routers.frontend.rule=Host(`localhost`)"
       - "traefik.http.routers.frontend.entrypoints=web"
       - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "512M"
+        reservations:
+          memory: "256M"
     restart: on-failure
 
   db:
@@ -95,7 +100,7 @@ services:
     restart: always
 
 
-# Initiation Services - these only run when explicitly called
+# Initialization ------------------
   frontend-init:
     profiles: ["init"]
     image: node:20

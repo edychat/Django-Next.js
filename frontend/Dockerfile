@@ -1,21 +1,18 @@
 # frontend/Dockerfile
-FROM node:20-slim
+FROM node:20-alpine
 
 WORKDIR /app
 
 # Copy package files first for cache-friendly builds
 COPY frontend/package*.json ./
 
-# Install dependencies first (faster rebuilds)
+# Install dependencies
 RUN npm ci --legacy-peer-deps
 
 # Copy app source (after deps for better caching)
-# Use .dockerignore to exclude node_modules from being copied
 COPY frontend/ ./
 
 ENV NODE_ENV=development \
-    CHOKIDAR_USEPOLLING=true \
-    WATCHPACK_POLLING=true \
     HOST=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000
