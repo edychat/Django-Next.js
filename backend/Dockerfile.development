@@ -56,28 +56,26 @@ COPY --chown=django:django . /app
 RUN chown -R django:django /app && \
     chmod -R 755 /app
 
-# Set hardcoded development database credentials
+# Set environment variables with defaults
 ENV DB_HOST=db \
     DB_PORT=5432 \
     DB_NAME=postgres \
     DB_USER=postgres \
     DB_PASSWORD=devpassword123 \
-    DJANGO_SETTINGS_MODULE=backend.settings
+    DJANGO_SETTINGS_MODULE=backend.settings \
+    MAX_WAIT=60 \
+    SLEEP=2 \
+    WAITED=0
+    DJANGO_SECRET_KEY=x \
+    DJANGO_DEBUG=True \
+    DOMAIN=example.com \
+    DJANGO_SUPERUSER_USERNAME=admin \
+    DJANGO_SUPERUSER_PASSWORD=admin
 
-# Create entrypoint script with hardcoded credentials
+# Create entrypoint script
 RUN cat > /entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
-
-# Use hardcoded environment variables from Dockerfile
-DB_HOST=${DB_HOST:-db}
-DB_PORT=${DB_PORT:-5432}
-DB_NAME=${DB_NAME:-postgres}
-DB_USER=${DB_USER:-postgres}
-DB_PASSWORD=${DB_PASSWORD:-postgres}
-MAX_WAIT=${MAX_WAIT:-60}
-SLEEP=2
-WAITED=0
 
 echo "🚀 Starting Django dev container"
 
@@ -163,9 +161,9 @@ from django.db import DatabaseError, OperationalError
 
 User = get_user_model()
 username = os.getenv('DJANGO_SUPERUSER_USERNAME')
-domain = os.getenv('DOMAIN', 'example.com')
+domain = os.getenv('DOMAIN')
 email = os.getenv('DJANGO_SUPERUSER_EMAIL', f'{username}@{domain}')
-password = os.getenv('DJANGO_SUPERUSER_PASSWORD', 'admin')
+password = os.getenv('DJANGO_SUPERUSER_PASSWORD')
 
 try:
     if username and not User.objects.filter(username=username).exists():

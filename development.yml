@@ -77,6 +77,10 @@ services:
     restart: on-failure
   db:
     image: postgres:16
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: devpassword123
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:

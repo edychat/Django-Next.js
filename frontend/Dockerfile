@@ -15,7 +15,7 @@ COPY frontend/ ./
 ENV NODE_ENV=development \
     HOST=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1 \
-    PORT=3000
+    PORT=3000 \
     NEXT_PUBLIC_API_URL=http://localhost/api
 
 EXPOSE 3000
