@@ -1,4 +1,4 @@
-# /compose/requirements/npm.txt
+# backend/_config/requirements/npm.txt
 # frontend dependencies
 
 next

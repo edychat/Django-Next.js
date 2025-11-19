@@ -1,4 +1,4 @@
-# backend/Dockerfile.deployment
+# backend/_config/Dockerfile.deployment
 # ---------- Build Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-build-stage
 WORKDIR /app
@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=off
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY requirements/ ./requirements/
+COPY _config/requirements/ ./requirements/
 RUN pip wheel --wheel-dir /wheels -r requirements/deployment.txt
 
 # ---------- Runtime Stage ----------
@@ -73,4 +73,4 @@ EOF
 RUN chmod +x /entrypoint.sh
 USER django
 
-CMD sh -c "/entrypoint.sh gunicorn backend.wsgi:application --bind 0.0.0.0:\${PORT:-8000} --workers 3"
+CMD sh -c "/entrypoint.sh gunicorn _config.wsgi:application --bind 0.0.0.0:\${PORT:-8000} --workers 3"

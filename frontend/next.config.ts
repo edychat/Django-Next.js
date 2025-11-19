@@ -14,6 +14,17 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
 
+  // Enable hot reload in Docker
+  webpack: (config, { dev }) => {
+    if (dev) {
+      config.watchOptions = {
+        poll: 1000,
+        aggregateTimeout: 300,
+      };
+    }
+    return config;
+  },
+
   // Rewrites for API routing
   async rewrites() {
     return [

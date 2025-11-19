@@ -1,4 +1,4 @@
-# compose/requirements/base.txt
+# backend/_config/requirements/base.txt
 
 # Django core dependencies
 Django==4.2.7
@@ -17,11 +17,14 @@ whitenoise==6.6.0
 redis==5.0.1
 hiredis==2.2.3
 
-# WSGI server
-gunicorn==23.0.0
-
 # Payment processing
 stripe==7.8.2
+
+# Image processing
+Pillow==10.2.0
+
+# Filtering and pagination
+django-filter==23.5
 
 # Other utilities
 python-decouple==3.8

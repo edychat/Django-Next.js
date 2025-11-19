@@ -45,6 +45,8 @@ else:
 # Dynamically find all apps in the backend folder
 def find_apps(base_dir, exclude_dirs=None):
     exclude_dirs = exclude_dirs or []
+    # Always exclude config directories to prevent them from being added as apps
+    exclude_dirs = list(exclude_dirs) + ['_config']
     apps = []
     for item in os.listdir(base_dir):
         item_path = os.path.join(base_dir, item)
@@ -55,9 +57,6 @@ def find_apps(base_dir, exclude_dirs=None):
         ):
             apps.append(item)
     return apps
-
-# Exclude specific folders
-EXCLUDE_DIRS = ['backend', 'requirements', 'staticfiles']
 
 # Application definition
 
@@ -72,7 +71,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-] + find_apps(BASE_DIR, EXCLUDE_DIRS)
+] + find_apps(BASE_DIR)
 if DEBUG:
     INSTALLED_APPS += ["django_extensions"]
 
@@ -90,7 +89,7 @@ MIDDLEWARE = [
 ]
 
 
-ROOT_URLCONF = 'backend.urls'
+ROOT_URLCONF = '_config.urls'
 
 TEMPLATES = [
     {
@@ -107,7 +106,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'backend.wsgi.application'
+WSGI_APPLICATION = '_config.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -172,11 +171,14 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 STATIC_URL = '/static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATIC_ROOT = os.path.join(BASE_DIR, '_config/staticfiles')
 
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Private assets (certificates, fonts, etc.)
+PRIVATE_ASSETS_PATH = os.path.join(BASE_DIR.parent, 'private_assets')
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -185,7 +187,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
     'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
-    'DEFAULT_PARSER_CLASSES': ['rest_framework.parsers.JSONParser'],
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.MultiPartParser',
+        'rest_framework.parsers.FormParser',
+    ],
 }
 
 # CORS settings
@@ -256,4 +262,5 @@ else:
 
 
 # Debug prints
-print(f"✅ {DATABASES['default']['ENGINE']} - DEBUG: {DEBUG} {ALLOWED_HOSTS}")
+print(f"⊧ {DATABASES['default']['ENGINE']}")
+print(f"⊧ DEBUG: {DEBUG} {ALLOWED_HOSTS}")

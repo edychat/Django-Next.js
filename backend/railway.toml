@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "./backend/Dockerfile.deployment"
+dockerfilePath = "./backend/_config/Dockerfile.deployment"
 context = "./backend"
 
 [deploy]

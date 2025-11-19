@@ -1,4 +1,4 @@
-# backend/Dockerfile.backend
+# backend/_config/Dockerfile.development
 # ---------- Build Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-build-stage
 
@@ -17,7 +17,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first to leverage layer caching
-COPY backend/requirements/ ./requirements/
+COPY backend/_config/requirements/ ./requirements/
 # Build wheels (faster installs in runtime stage)
 RUN pip wheel --wheel-dir /wheels -r requirements/development.txt
 
@@ -62,15 +62,10 @@ ENV DB_HOST=db \
     DB_NAME=postgres \
     DB_USER=postgres \
     DB_PASSWORD=devpassword123 \
-    DJANGO_SETTINGS_MODULE=backend.settings \
+    DJANGO_SETTINGS_MODULE=_config.settings \
     MAX_WAIT=60 \
     SLEEP=2 \
     WAITED=0
-    DJANGO_SECRET_KEY=x \
-    DJANGO_DEBUG=True \
-    DOMAIN=example.com \
-    DJANGO_SUPERUSER_USERNAME=admin \
-    DJANGO_SUPERUSER_PASSWORD=admin
 
 # Create entrypoint script
 RUN cat > /entrypoint.sh <<'EOF'
@@ -145,7 +140,7 @@ import os
 import django
 import sys
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', os.getenv('DJANGO_SETTINGS_MODULE', 'backend.settings'))
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', os.getenv('DJANGO_SETTINGS_MODULE', '_config.settings'))
 
 try:
     django.setup()

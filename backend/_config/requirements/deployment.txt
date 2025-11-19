@@ -1,4 +1,4 @@
-# /compose/requirements/deployment.txt
+# backend/_config/requirements/deployment.txt
 
 -r base.txt
 
