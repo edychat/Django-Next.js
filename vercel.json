@@ -1,7 +1,15 @@
 {
   "framework": "nextjs",
-  "rootDirectory": "frontend",
-  "installCommand": "npm install --workspace=web --workspace='packages/*' --include-workspace-root",
-  "buildCommand": "npm run web:build",
-  "outputDirectory": "web/.next"
+  "installCommand": "npm install && cd frontend/web && npm install",
+  "buildCommand": "cd frontend/web && npm run build",
+  "outputDirectory": "frontend/web/.next",
+  "headers": [
+    {
+      "source": "/(.*\\.pdf)",
+      "headers": [
+        { "key": "Content-Type", "value": "application/pdf" },
+        { "key": "Content-Disposition", "value": "inline" }
+      ]
+    }
+  ]
 }

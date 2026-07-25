@@ -1,0 +1,6 @@
+{
+  "name": "oldbook-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mobile workspace — app folders go here (each with their own package.json)"
+}

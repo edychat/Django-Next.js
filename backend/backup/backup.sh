@@ -683,13 +683,15 @@ for app in apps.get_app_configs():
         log "📦 Database is empty - restoring from backup"
     fi
     
-    # Force restore with CASCADE to handle foreign key constraints
+    # Force restore — strip OWNER TO statements which fail on managed DBs (Railway, RDS, etc.)
     local psql_errors=$(mktemp)
-    log "Executing restore with CASCADE to handle constraints..."
+    local clean_sql=$(mktemp)
+    grep -v "^ALTER .* OWNER TO " "${sql_file}" > "${clean_sql}"
+    log "Executing restore (OWNER TO statements stripped for managed DB compatibility)..."
     
-    if psql --single-transaction -f "${sql_file}" > /dev/null 2> "${psql_errors}"; then
+    if psql -v ON_ERROR_STOP=0 -f "${clean_sql}" > /dev/null 2> "${psql_errors}"; then
         log "✅ Database restored successfully from $(basename "$db_file")"
-        rm -f "${psql_errors}"
+        rm -f "${psql_errors}" "${clean_sql}"
         
         # Create marker file to prevent future restores
         echo "Database restored on $(date) from $(basename "$db_file")" > "$RESTORE_MARKER"
@@ -801,12 +803,17 @@ restore_snapshot_file() {
     log "Restoring database from snapshot..."
     if [ -f "${extracted_dir}/database.sql" ]; then
         local psql_errors=$(mktemp)
-        if psql --single-transaction -f "${extracted_dir}/database.sql" > /dev/null 2> "${psql_errors}"; then
+        local clean_sql=$(mktemp)
+        # Strip OWNER TO statements — they fail on managed DBs (Railway, RDS, etc.)
+        # where the DB user is not 'postgres', causing the whole restore to roll back.
+        grep -v "^ALTER .* OWNER TO " "${extracted_dir}/database.sql" > "${clean_sql}"
+        log "Stripped OWNER TO statements from SQL dump"
+        if psql -v ON_ERROR_STOP=0 -f "${clean_sql}" > /dev/null 2> "${psql_errors}"; then
             log "✅ Database restored successfully"
-            rm -f "${psql_errors}"
+            rm -f "${psql_errors}" "${clean_sql}"
         else
             local exit_code=$?
-            log "⚠️  WARNING: Database restore failed (exit code: ${exit_code})"
+            log "⚠️  WARNING: Database restore had errors (exit code: ${exit_code})"
             if [ -s "${psql_errors}" ]; then
                 log "Errors encountered:"
                 while IFS= read -r error_line; do
@@ -814,7 +821,7 @@ restore_snapshot_file() {
                 done < "${psql_errors}"
                 cat "${psql_errors}" >> "${LOG_FILE}"
             fi
-            rm -f "${psql_errors}"
+            rm -f "${psql_errors}" "${clean_sql}"
         fi
     else
         log "⚠️  No database.sql file found in snapshot"
@@ -852,9 +859,8 @@ restore_snapshot_file() {
     echo "Snapshot restored on $(date) from $(basename "$snapshot_file")" > "$RESTORE_MARKER"
     log "✅ Restore marker created: $RESTORE_MARKER"
     
-    # Clean up snapshot file
-    rm -f "$snapshot_file"
-    log "✅ Snapshot file cleaned up"
+    # Do NOT delete the snapshot file — it is committed to git and needed for future redeploys
+    # rm -f "$snapshot_file"
     
     # Show stats
     show_database_stats

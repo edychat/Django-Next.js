@@ -18,7 +18,3 @@ django-permissions-policy==4.19.0  # Permissions-Policy header
 
 # Health checks
 django-health-check==3.18.1  # Health check endpoints for load balancers
-
-# Cloud Storage for backups (optional - only if using GCS)
-google-cloud-storage==3.2.0  # Google Cloud Storage for production backups
-django-storages[google]==1.14.2  # Storage backends for Django (with GCS support)

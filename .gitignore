@@ -1,4 +1,9 @@
 ### Python template
+# Device backups — never commit (can be 100GB+)
+/imports/
+/imports/**
+backend/media/imports/
+backend/media/imports/**
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -275,6 +280,17 @@ dump.rdb
 ### Project template
 /media/
 
+# All backend media — uploads, imports, photoprism, chat media. Never commit.
+backend/media/
+backend/media/**
+
+
+
+# WhatsApp / iOS backup folders (may live outside media/ too)
+backend/AppDomainGroup-group.net.whatsapp.WhatsApp.shared/
+backend/**/AppDomainGroup*/
+backend/**/00008110*/
+
 .pytest_cache/
 .ipython/
 .env
@@ -334,3 +350,4 @@ frontend/mobile/builds/
 # Setup lockfile (per-machine, not committed)
 .setup-complete
 .dev-setup-done
+backend/config/.tunnel-watchdog-*.sh

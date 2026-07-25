@@ -35,17 +35,15 @@ README*
 
 # Media and data files (large files that shouldn't be in the image)
 media/
-# Exclude WhatsApp messages directory (contains 43MB+ of video files for local testing)
-contacts/management/commands/messages/
-_config/staticfiles/
-_config/backup/db/
-_config/backup/snapshots/
+config/staticfiles/
+backup/db/
+backup/snapshots/
 # Allow backup files in start directory for deployment restore
-_config/backup/start/*.log
-_config/backup/start/backup_*
-!_config/backup/start/*.sql.gz
-!_config/backup/start/*.sql
-!_config/backup/start/*.tar.gz
+backup/start/*.log
+backup/start/backup_*
+!backup/start/*.sql.gz
+!backup/start/*.sql
+!backup/start/*.tar.gz
 
 # Git
 .git/

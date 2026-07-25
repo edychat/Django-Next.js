@@ -1,6 +1,12 @@
 # backend/config/Dockerfile.development
 # Multi-stage build for optimized image size
 # Features: Auto-migrations, auto-restore, scheduled backups, non-root user
+#
+# This file is a shared template — keep it free of project-specific logic.
+# To extend it for a specific project, create <app>/Dockerfile that does:
+#   FROM ${BASE_IMAGE:-<project>-backend-base}
+# and add only what that app needs. See backend/project.py (COMPOSE_SERVICES) for the build overwrite (backend-base service + backend override).
+
 # ---------- Build Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-build-stage
 
@@ -12,8 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Copy system package requirements first
 COPY backend/requirements/packages.txt ./requirements/
 
-# Install build deps from packages.txt for easy customization
-# Edit requirements/packages.txt to add/remove system dependencies
+# Install build deps from packages.txt
 RUN set -e; \
     apt-get update; \
     # Extract package names: remove full-line comments, strip inline comments, filter empty lines
@@ -35,9 +40,13 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Copy only requirements first to leverage layer caching
 COPY backend/requirements/ ./requirements/
+
 # Build wheels (faster installs in runtime stage)
 # --prefer-binary avoids building from source when possible
-RUN pip wheel --wheel-dir /wheels --prefer-binary -r requirements/development.txt
+# Use --no-build-isolation to avoid temp directory issues
+RUN mkdir -p /wheels && \
+    pip wheel --wheel-dir /wheels --prefer-binary --no-build-isolation -r requirements/development.txt || \
+    pip wheel --wheel-dir /wheels --prefer-binary -r requirements/development.txt
 
 # ---------- Runtime Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-run-stage
@@ -48,7 +57,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/backend \
     PIP_NO_CACHE_DIR=1
 
-# Minimal runtime deps with PostgreSQL 17 client (latest)
+# ── Layer 1: stable base system packages (rarely changes) ─────────────────────
+# These never change between builds unless you edit this block.
+# Put them FIRST so they cache independently of requirements files.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     libpq-dev \
@@ -67,10 +78,57 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
+# ── Layer 2: project runtime packages ────────────────────────────────────────
+COPY backend/requirements/runtime-packages.txt /backend/requirements/runtime-packages.txt
+RUN set -e; \
+    if [ -f /backend/requirements/runtime-packages.txt ]; then \
+        apt-get update; \
+        PACKAGES=$(grep -v '^#' /backend/requirements/runtime-packages.txt | \
+                   sed 's/#.*//' | \
+                   grep -v '^$' | \
+                   tr '\n' ' ' | \
+                   sed 's/  */ /g'); \
+        if [ -n "$PACKAGES" ]; then \
+            echo "Installing project-specific runtime packages: $PACKAGES"; \
+            apt-get install -y --no-install-recommends $PACKAGES; \
+        fi; \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "No project-specific runtime packages found, skipping..."; \
+    fi
+
+# ── Layer 3: Python packages from wheels ─────────────────────────────────────
+COPY backend/requirements/ /backend/requirements/
+
 # Copy wheels and install (no network at runtime; faster)
 COPY --from=python-build-stage /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
  && rm -rf /wheels
+
+# ── Layer 4: extra Python packages (auto-discovered) ─────────────────────────
+# Installs any .txt file in requirements/ that isn't a core template file.
+# Drop project.txt (or any named file) into requirements/ to add packages
+# without touching this Dockerfile.
+RUN for project_req in /backend/requirements/*.txt; do \
+        filename=$(basename "$project_req"); \
+        # Skip core template files (already installed above via development.txt) \
+        if [ "$filename" = "base.txt" ] || \
+           [ "$filename" = "development.txt" ] || \
+           [ "$filename" = "deployment.txt" ]; then \
+            continue; \
+        fi; \
+        # Skip non-Python requirement files \
+        if [ "$filename" = "packages.txt" ] || \
+           [ "$filename" = "runtime-packages.txt" ] || \
+           [ "$filename" = "setup.txt" ]; then \
+            continue; \
+        fi; \
+        # Install everything else (e.g. project.txt) \
+        if [ -f "$project_req" ]; then \
+            echo "Installing extra Python dependencies from $filename..."; \
+            pip install --no-cache-dir -r "$project_req"; \
+        fi; \
+    done
 
 # Create non-root user for safety
 RUN addgroup --system django && adduser --system --ingroup django django

@@ -2,16 +2,14 @@
 
 # dependencies
 node_modules/
-EliteCar/node_modules/
-EliteCar Driver/node_modules/
+# Per-app node_modules (app folders go here)
+*/node_modules/
 
 # Expo
 .expo/
 .expo-shared/
-EliteCar/.expo/
-EliteCar/.expo-shared/
-EliteCar Driver/.expo/
-EliteCar Driver/.expo-shared/
+*/.expo/
+*/.expo-shared/
 dist/
 web-build/
 expo-env.d.ts
@@ -28,6 +26,8 @@ expo-env.d.ts
 
 # Metro
 .metro-health-check*
+.metro-cache/
+*/.metro-cache/
 
 # debug
 npm-debug.*
@@ -45,20 +45,13 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# generated native folders
-/ios
-/android
-EliteCar/ios
-EliteCar/android
-EliteCar Driver/ios
-
-# package-lock.json is needed per-app for EAS builds
-# EliteCar Driver/android is needed for EAS builds
+# generated native folders (per-app)
+*/ios
+*/android
 
 # local.properties contains machine-specific SDK paths — never commit
-EliteCar/android/local.properties
-EliteCar Driver/android/local.properties
+*/android/local.properties
 
-# Built APK/AAB artifacts — never upload to EAS or commit
+# Built APK/AAB artifacts
 Builds/
 builds/

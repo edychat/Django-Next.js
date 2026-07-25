@@ -1,84 +1,25 @@
-# Manual run (no mobile services): DOCKER_BUILDKIT=1 docker compose -f dev.yml up -d --build traefik db backend frontend 
-# To build/start the docker dev environment (with mobile services it auto-detects mobile apps) run: ./dev.sh 
+# Manual run (no mobile services): DOCKER_BUILDKIT=1 docker compose -f dev.yml up -d --build db backend frontend
+# To build/start the docker dev environment run: ./dev.sh
 #
-# Mobile services are NOT hardcoded here. dev.sh scans frontend/mobile/ and starts a mobile-<name> container for every app folder it finds.
-# Any folder with a package.json (except node_modules and shared) becomes a service.
-# 
 # ML Service Architecture:
 #   Development (Local): ML built into Django backend at /ml_service/ endpoints
-#     - Uses development.txt requirements - No separate service needed - ML_SERVICE_URL environment variable should be empty/unset
 #   Deployment (Cloud): Lightweight backend + External ML service (REQUIRED)
-#     - Backend uses deployment.txt - Deploy external ML service separately (serverless, auto-scaling) - MUST set ML_SERVICE_URL environment variable to external ML service
+#     - MUST set ML_SERVICE_URL environment variable to external ML service
 
 volumes:
   db_data:
   redis_data:
   frontend_node_modules:
+  frontend_next:
+
+# Join the shared traefik network so the global Traefik can reach containers
+networks:
+  traefik:
+    external: true
+  default:
+    driver: bridge
 
 services:
-  traefik:
-    image: traefik:v3.6.5
-    ports:
-      - "80:80"
-      - "8080:8080"   # Traefik dashboard
-    volumes: []
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-    entrypoint:
-      - sh
-      - -c
-      - |
-        mkdir -p /etc/traefik
-        cat > /etc/traefik/dynamic.yml << 'EOF'
-        http:
-          routers:
-            frontend:
-              rule: "Host(`localhost`)"
-              entryPoints: [web]
-              service: frontend
-            backend:
-              rule: "Host(`localhost`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/media`))"
-              entryPoints: [web]
-              priority: 100
-              service: backend
-              middlewares: [strip-api-prefix, backend-compress]
-          services:
-            frontend:
-              loadBalancer:
-                servers:
-                  - url: "http://frontend:3000"
-            backend:
-              loadBalancer:
-                servers:
-                  - url: "http://backend:8000"
-          middlewares:
-            strip-api-prefix:
-              stripPrefix:
-                prefixes: [/api]
-            backend-compress:
-              compress: {}
-        EOF
-        exec traefik \
-          --log.level=INFO \
-          --ping=true \
-          --ping.entrypoint=web \
-          --api=true \
-          --api.dashboard=true \
-          --api.insecure=true \
-          --entrypoints.web.address=:80 \
-          --entrypoints.traefik.address=:8080 \
-          --entrypoints.web.transport.respondingTimeouts.readTimeout=0 \
-          --entrypoints.web.transport.respondingTimeouts.writeTimeout=0 \
-          --entrypoints.web.transport.respondingTimeouts.idleTimeout=180s \
-          --providers.file.filename=/etc/traefik/dynamic.yml \
-          --providers.file.watch=true \
-          --global.checknewversion=false \
-          --global.sendanonymoususage=false
 
   backend:
     build:
@@ -87,7 +28,8 @@ services:
     env_file:
       - .env
     environment:
-      # Infrastructure defaults – hardcoded, same for every dev
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-django-insecure-dev-key-change-in-production}"
+      DJANGO_DEBUG: "${DJANGO_DEBUG:-true}"
       DB_HOST: "db"
       DB_PORT: "5432"
       DB_NAME: "postgres"
@@ -96,10 +38,7 @@ services:
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       REDIS_DB: "0"
-      EXPO_PUBLIC_API_URL: "http://host.docker.internal:8000/api"
-      NEXT_PUBLIC_API_URL: "http://localhost/api"
       EXPO_PUBLIC_ENV: "development"
-      # ML Service: leave empty for dev (built-in endpoints), set URL for production
       ML_SERVICE_URL: "${ML_SERVICE_URL:-}"
     volumes:
       - ./backend:/backend:delegated
@@ -114,8 +53,57 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
-    ports:
-      - "8000:8000"
+    networks:
+      - default
+      - traefik
+    labels:
+      # Tell global Traefik to route ${PROJECT_HOST}.localhost/api → this container
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      # API routes — localhost (high priority)
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.priority=100"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.middlewares=${COMPOSE_PROJECT_NAME}-strip-api,${COMPOSE_PROJECT_NAME}-compress"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-api.stripprefix.prefixes=/api"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-compress.compress=true"
+      # API routes — tunnel / any other hostname (lower priority, no Host constraint)
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api-tunnel.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api-tunnel.priority=50"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api-tunnel.middlewares=${COMPOSE_PROJECT_NAME}-strip-api,${COMPOSE_PROJECT_NAME}-compress"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api-tunnel.service=${COMPOSE_PROJECT_NAME}-backend"
+      # Admin / static / media routes — localhost (high priority)
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/admin`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin.priority=100"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin.middlewares=${COMPOSE_PROJECT_NAME}-compress"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/static`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static.priority=100"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/media`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media.priority=100"
+      # Admin / static / media routes — tunnel / any other hostname (lower priority)
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin-tunnel.rule=PathPrefix(`/admin`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin-tunnel.priority=50"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin-tunnel.middlewares=${COMPOSE_PROJECT_NAME}-compress"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin-tunnel.service=${COMPOSE_PROJECT_NAME}-backend"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static-tunnel.rule=PathPrefix(`/static`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static-tunnel.priority=50"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static-tunnel.service=${COMPOSE_PROJECT_NAME}-backend"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media-tunnel.rule=PathPrefix(`/media`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media-tunnel.priority=50"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media-tunnel.service=${COMPOSE_PROJECT_NAME}-backend"
+      # Backend service port
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-backend.loadbalancer.server.port=8000"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.service=${COMPOSE_PROJECT_NAME}-backend"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-admin.service=${COMPOSE_PROJECT_NAME}-backend"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-static.service=${COMPOSE_PROJECT_NAME}-backend"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-media.service=${COMPOSE_PROJECT_NAME}-backend"
     restart: unless-stopped
 
   frontend:
@@ -127,30 +115,67 @@ services:
     environment:
       NODE_ENV: "development"
       NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_PUBLIC_API_URL: "http://localhost/api"
-      # Hot reload — polling required for Podman VM filesystem layer
-      WATCHPACK_POLLING: "true"
-      WATCHPACK_POLLING_INTERVAL: "500"
+      # NUMBER in ms, not "true" — "true" silently defaults to 5007ms (too slow).
+      # Polling is needed on macOS (Podman VM) and Windows (WSL2).
+      WATCHPACK_POLLING: "500"
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "500"
+      NEXT_PUBLIC_URL: "http://${PROJECT_HOST}.localhost"
+      NEXT_PUBLIC_API_URL: "/api"
     volumes:
-      - ./frontend/web:/app/web:z
-      - ./frontend/packages:/app/packages:z
-      - frontend_node_modules:/app/web/node_modules
+      - ./frontend/web:/app:z
+      - frontend_node_modules:/app/node_modules
+      - frontend_next:/app/.next
+      - ./frontend/web/public/bookcovers:/app/public/bookcovers:z,ro
+    # Expose port 3000 directly — HMR WebSocket connects back to the page
+    # hostname/port. When accessed via Traefik on port 80 the browser sends
+    # the WS upgrade to port 80, which Traefik forwards fine. But direct
+    # access on :3000 also works (useful for debugging / Windows WSL2 setups).
+    ports:
+      - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    ports:
-      - "3000:3000"
+      test: ["CMD", "sh", "-c", "curl -s --max-time 5 -o /dev/null http://localhost:3000 || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 120s
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      # ── HMR WebSocket router (highest priority, no compression middleware) ──
+      # Must be separate from the main frontend router — the compress middleware
+      # breaks WebSocket upgrade headers, killing hot reload in the browser.
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/_next/webpack-hmr`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.priority=200"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.service=${COMPOSE_PROJECT_NAME}-frontend"
+      # HMR — tunnel hostname
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.rule=PathPrefix(`/_next/webpack-hmr`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.priority=150"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.service=${COMPOSE_PROJECT_NAME}-frontend"
+      # ── Main frontend router ──────────────────────────────────────────────
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.rule=Host(`${PROJECT_HOST}.localhost`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.priority=1"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.service=${COMPOSE_PROJECT_NAME}-frontend"
+      # Frontend — tunnel / any other hostname (catch-all)
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.priority=1"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.service=${COMPOSE_PROJECT_NAME}-frontend"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-frontend.loadbalancer.server.port=3000"
     restart: unless-stopped
-  # Mobile services are defined in mobile-services.yml (auto-generated).
-  # Run `make gen-mobile` or `make dev` to regenerate from frontend/mobile/ folders.
 
   eas-build:
     profiles: ["eas"]
@@ -159,13 +184,11 @@ services:
     env_file:
       - .env
     environment:
-      # APP: specific app type to build (e.g. "driver"), or "all"/unset for every app
       APP: "${APP:-all}"
-      PLATFORM: "${PLATFORM:-ios}"  # ios | android | all
+      PLATFORM: "${PLATFORM:-ios}"
       PROFILE: "${PROFILE:-development}"
     volumes:
       - ./frontend/mobile:/app
-      - ./frontend/mobile/scripts/mobile.sh:/usr/local/bin/mobile.sh:ro
     command:
       - sh
       - -c
@@ -174,7 +197,7 @@ services:
         npm install -g eas-cli --silent &&
         eas whoami || (echo '❌ EXPO_TOKEN is not set in .env' && exit 1) &&
         echo '📦 Running EAS build for $$APP on $$PLATFORM...' &&
-        bash /usr/local/bin/mobile.sh eas-build
+        /mobile.sh eas-build
 
   db:
     image: postgres:17
@@ -202,8 +225,6 @@ services:
       timeout: 3s
       retries: 10
     restart: always
-    ports:
-      - "6379:6379"
 
 
 # Initialization Section ------------------
@@ -226,63 +247,23 @@ services:
       sh -c "
         echo '📦 Starting frontend initialization...' &&
         npm install -g npm@latest &&
-
         echo '🔄 Backing up custom files...' &&
         mkdir -p /tmp/backup &&
         if [ -f Dockerfile ]; then cp Dockerfile /tmp/backup/; fi &&
         if [ -f next.config.ts ]; then cp next.config.ts /tmp/backup/; fi &&
         if [ -f app/components/api.ts ]; then mkdir -p /tmp/backup/app/components && cp app/components/api.ts /tmp/backup/app/components/; fi &&
-
         echo '🧹 Cleaning frontend directory completely...' &&
         rm -rf /app/* /app/.* 2>/dev/null || true &&
-
-        echo '�  Running create-next-app...' &&
+        echo '🏗  Running create-next-app...' &&
         npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir=false --import-alias='@/*' --turbopack --no-git &&
-
-        echo '�  Installing dependencies...' &&
+        echo '📦 Installing dependencies...' &&
         npm install &&
-
         echo '🔙 Restoring custom files...' &&
         if [ -f /tmp/backup/Dockerfile ]; then mv /tmp/backup/Dockerfile ./; fi &&
         if [ -f /tmp/backup/next.config.ts ]; then mv /tmp/backup/next.config.ts ./; fi &&
         if [ -f /tmp/backup/app/components/api.ts ]; then mkdir -p app/components && mv /tmp/backup/app/components/api.ts app/components/; fi &&
-
         echo '✅ Frontend initialization complete!'
       "
-
-  npm-init:
-    profiles: ["init"]
-    image: node:24-slim
-    working_dir: /app
-    volumes:
-      - ./frontend:/app
-      - ./backend/requirements/npm.txt:/deps/npm.txt:ro
-    command: >
-      sh -c '
-        apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/* &&
-        echo "📦 Syncing npm dependencies with /deps/npm.txt..." &&
-
-        wanted_deps=$$(grep -v "^\s*#" /deps/npm.txt | sed "/^\s*$$/d")
-
-        for dep in $$wanted_deps; do
-          if ! grep -q "\"$$dep\"" package.json; then
-            echo "Installing $$dep..."
-            npm install "$$dep" --save --legacy-peer-deps
-          else
-            echo "$$dep already present, skipping."
-          fi
-        done
-
-        current_deps=$$(jq -r ".dependencies | keys[]" package.json)
-        for dep in $$current_deps; do
-          if ! echo "$$wanted_deps" | grep -qx "$$dep"; then
-            echo "Removing extra dependency $$dep..."
-            npm uninstall "$$dep" --save
-          fi
-        done
-
-        echo "✅ package.json now strictly matches /deps/npm.txt"
-      '
 
   app-init:
     profiles: ["init"]
@@ -302,10 +283,6 @@ services:
       - APP_NAME=${APP_NAME:-app}
 
 # Backup Section ------------------
-# Note: Daily DB backups are AUTOMATIC ONLY (via cron at 2:00 AM)
-# Manual operations available: Full snapshot, Restore, List
-
-# Full snapshot (requires FULL_BACKUP=true)
   backup-snapshot:
     profiles: ["backup"]
     image: postgres:17
@@ -329,7 +306,6 @@ services:
         apt-get update -qq &&
         apt-get install -y -qq postgresql-client gzip tar cpio > /dev/null 2>&1 &&
         echo '✅ Packages installed' &&
-        echo '' &&
         FULL_BACKUP=true /backend/backup/backup.sh snapshot
       "
 
@@ -364,7 +340,6 @@ services:
         apt-get update -qq &&
         apt-get install -y -qq postgresql-client gzip tar cpio > /dev/null 2>&1 &&
         echo "✅ Packages installed" &&
-        echo "" &&
         /backend/backup/backup.sh restore
       '
 

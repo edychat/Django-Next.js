@@ -1,35 +1,26 @@
 #!/bin/sh
 set -e
 
-echo "🚀 Starting Django production container"
+echo "🚀 Starting Django development container"
 
 # Parse DATABASE_URL to extract connection parameters
 if [ -n "$DATABASE_URL" ]; then
-    # Remove protocol prefix
     DB_URL_NO_PROTO="${DATABASE_URL#postgres://}"
     DB_URL_NO_PROTO="${DB_URL_NO_PROTO#postgresql://}"
-
-    # Extract user and password
     DB_USER_PASS="${DB_URL_NO_PROTO%%@*}"
     export PGUSER="${DB_USER_PASS%%:*}"
     export PGPASSWORD="${DB_USER_PASS#*:}"
-
-    # Extract host, port, and database
     DB_HOST_PORT_DB="${DB_URL_NO_PROTO#*@}"
     DB_HOST_PORT="${DB_HOST_PORT_DB%%/*}"
     export PGHOST="${DB_HOST_PORT%%:*}"
-    # Handle port: if no colon, use default port 5432
     if [ "$DB_HOST_PORT" = "$PGHOST" ]; then
         export PGPORT="5432"
     else
         export PGPORT="${DB_HOST_PORT#*:}"
     fi
     export PGDATABASE="${DB_HOST_PORT_DB#*/}"
-
-    # Remove query parameters (backslash prevents ? from being treated as wildcard)
     export PGDATABASE="${PGDATABASE%%\?*}"
 else
-    # Use individual environment variables
     export PGHOST="${DB_HOST:-localhost}"
     export PGPORT="${DB_PORT:-5432}"
     export PGDATABASE="${DB_NAME:-postgres}"
@@ -37,67 +28,70 @@ else
     export PGPASSWORD="${DB_PASSWORD:-postgres}"
 fi
 
-# Wait for database to be ready before proceeding
-echo "⏳ Waiting for database to be ready..."
+# Wait for database
+echo "⏳ Waiting for database..."
 max_attempts=30
 attempt=0
-
 while [ $attempt -lt $max_attempts ]; do
     if pg_isready -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" > /dev/null 2>&1; then
-        echo "✅ Database is ready!"
+        echo "✅ Database ready"
         break
     fi
     attempt=$((attempt + 1))
-    echo "   Waiting for database... (attempt ${attempt}/${max_attempts})"
+    echo "   attempt ${attempt}/${max_attempts}..."
     sleep 2
 done
-
 if [ $attempt -eq $max_attempts ]; then
-    echo "❌ ERROR: Database not ready after ${max_attempts} attempts"
-    echo "   Host: ${PGHOST}, Port: ${PGPORT}, Database: ${PGDATABASE}"
-    echo "   Container will exit. Check database connection and try again."
+    echo "❌ Database not ready after ${max_attempts} attempts — exiting"
     exit 1
 fi
 
-# Restore from start folder if any backup files exist
-echo "🔄 Checking for database restore from GitHub repo..."
-if [ -f /backend/config/backup/backup.sh ]; then
-    /backend/config/backup/backup.sh auto-restore || echo "⚠️ Restore skipped or failed, continuing..."
+# Auto-restore from backup if present
+if [ -f /backend/backup/backup.sh ]; then
+    RESTORE_MARKER="/backend/backup/.db_restored"
+    NEWEST_SNAPSHOT=$(ls -1t /backend/backup/start/*.tar.gz 2>/dev/null | head -n 1)
+
+    # Force restore if the books table is empty, regardless of marker
+    if [ -n "$NEWEST_SNAPSHOT" ]; then
+        BOOK_COUNT=$(psql -t -c "SELECT COUNT(*) FROM books_book;" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        if [ "$BOOK_COUNT" = "0" ] || [ -z "$BOOK_COUNT" ]; then
+            echo "📚 books_book table is empty — forcing restore from snapshot"
+            rm -f "$RESTORE_MARKER"
+        fi
+    fi
+
+    /backend/backup/backup.sh auto-restore || true
 fi
 
 if [ -f manage.py ]; then
     echo "📦 Applying migrations..."
-    if ! python manage.py migrate --noinput; then
-        echo "❌ Migration failed! This is a fatal error."
-        echo "   Database tables are required for the application to work."
-        echo "   Please check the database connection and migration files."
-        exit 1
-    fi
-    echo "✅ Migrations applied successfully"
+    python manage.py migrate --noinput || { echo "❌ Migration failed"; exit 1; }
+    echo "✅ Migrations done"
 
     echo "📁 Collecting static files..."
-    python manage.py collectstatic --noinput --clear || echo "⚠️ Static collection failed, continuing..."
+    python manage.py collectstatic --noinput --clear 2>/dev/null || true
 
-    # Create superuser if not exists
+    # Create superuser
     if [ -n "$DJANGO_SUPERUSER_USERNAME" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ] && [ -n "$DOMAIN" ]; then
         python manage.py shell << END
 import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-
 username = os.getenv('DJANGO_SUPERUSER_USERNAME')
 domain = os.getenv('DOMAIN')
 email = f'{username}@{domain}'
-
 if not User.objects.filter(username=username).exists():
     User.objects.create_superuser(username, email, os.getenv('DJANGO_SUPERUSER_PASSWORD'))
-    print(f"Superuser created: {username} with email: {email}")
+    print(f"✅ Superuser created: {username}")
 else:
-    print(f"Superuser already exists: {username}")
+    print(f"✅ Superuser exists: {username}")
 END
-    else
-        echo "Missing required environment variables for superuser creation"
     fi
+
+    # Run app entrypoint hooks in background.
+    # Any installed app can provide a `manage.py entrypoint` command — Django discovers it automatically.
+    echo "🔧 Running app entrypoint hooks in background..."
+    (python manage.py entrypoint >> /tmp/entrypoint_hooks.log 2>&1) &
 fi
 
 exec "$@"

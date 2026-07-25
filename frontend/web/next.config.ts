@@ -1,9 +1,9 @@
-// next.config.ts
-import { NextConfig } from 'next';
-import path from 'path';
+import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  trailingSlash: true,
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
   images: {
     unoptimized: true,
   },
@@ -12,52 +12,47 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
 
-  // Transpile shared packages
-  transpilePackages: [
-    '@elitecar/api-client',
-    '@elitecar/constants',
-    '@elitecar/storage',
-    '@elitecar/theme',
-    '@elitecar/types',
-    '@elitecar/utils',
-    '@elitecar/assets',
+  // Allow HMR WebSocket connections from any .localhost subdomain and
+  // Cloudflare tunnel hostnames. Required when Next.js sits behind Traefik.
+  allowedDevOrigins: [
+    '*.localhost',
+    '*.trycloudflare.com',
   ],
 
-  // Turbopack configuration (used in dev with --turbopack flag)
-  // Note: Turbopack resolveAlias requires relative paths from the project root,
-  // not absolute paths. Use './' prefix relative to the Next.js project root (frontend/web).
-  turbopack: {
-    resolveAlias: {
-      '@elitecar/api-client': '../packages/api-client/src',
-      '@elitecar/constants': '../packages/constants/src',
-      '@elitecar/storage': '../packages/storage/src',
-      '@elitecar/theme': '../packages/theme/src',
-      '@elitecar/types': '../packages/types/src',
-      '@elitecar/utils': '../packages/utils/src',
-      '@elitecar/assets': '../packages/assets',
-    },
+  async headers() {
+    return [
+      {
+        source: '/nancy',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store, no-cache, must-revalidate' },
+          { key: 'Pragma', value: 'no-cache' },
+        ],
+      },
+      {
+        source: '/resources/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store, no-cache, must-revalidate' },
+        ],
+      },
+    ];
   },
 
-  // Webpack configuration for path aliases (used in production builds)
-  webpack: (config) => {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      '@elitecar/api-client': path.resolve(__dirname, '../packages/api-client/src'),
-      '@elitecar/constants': path.resolve(__dirname, '../packages/constants/src'),
-      '@elitecar/storage': path.resolve(__dirname, '../packages/storage/src'),
-      '@elitecar/theme': path.resolve(__dirname, '../packages/theme/src'),
-      '@elitecar/types': path.resolve(__dirname, '../packages/types/src'),
-      '@elitecar/utils': path.resolve(__dirname, '../packages/utils/src'),
-      '@elitecar/assets': path.resolve(__dirname, '../packages/assets'),
-    };
+  webpack: (config, { dev }) => {
+    if (dev) {
+      // Polling is required on macOS (Podman/Docker VM) and Windows (WSL2)
+      // because inotify events don't cross the host→VM→container boundary.
+      // poll: 500 = check every 500ms — fast enough to feel instant.
+      config.watchOptions = {
+        poll: 500,
+        aggregateTimeout: 300,
+        ignored: [
+          '**/node_modules/**',
+          '**/.next/**',
+          '**/public/bookcovers/**',
+        ],
+      };
+    }
     return config;
-  },
-
-  // Rewrites for API routing
-  async rewrites() {
-    // In Docker with Traefik, don't rewrite - let browser call /api directly
-    // Traefik will route /api requests to the backend service
-    return [];
   },
 };
 

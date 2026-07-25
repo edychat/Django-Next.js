@@ -1,0 +1,70 @@
+name: Deploy to Vercel
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - preview
+
+# Cancel any in-progress deployment when a new push arrives so runs
+# never pile up and block each other on Vercel's build queue.
+concurrency:
+  group: vercel-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      # Project config must live next to the Next.js package.json so Vercel
+      # CLI can detect the framework version correctly.
+      - name: Create Vercel project config
+        working-directory: ./frontend/web
+        run: |
+          mkdir -p .vercel
+          cat > .vercel/project.json << EOF
+          {
+            "orgId": "${{ secrets.VERCEL_ORG_ID }}",
+            "projectId": "${{ secrets.VERCEL_PROJECT_ID }}"
+          }
+          EOF
+
+      # Build the app locally in CI so failures are immediately visible
+      # and we are not waiting for Vercel's remote build queue.
+      - name: Build with Vercel
+        working-directory: ./frontend/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel build --prod --yes --token=$VERCEL_TOKEN
+
+      # Upload the pre-built output — this is a fast file transfer, not a
+      # remote build, so it completes in seconds and cannot hang.
+      - name: Deploy prebuilt to Vercel
+        working-directory: ./frontend/web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel deploy --prebuilt --prod --yes --token=$VERCEL_TOKEN

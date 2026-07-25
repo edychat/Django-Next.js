@@ -1,0 +1,10 @@
+# Ignore intermediate backup rotation files in this directory
+# (these are created during backup runs and deleted after moving to start/)
+backup_*.sql.gz
+snapshot_*.tar.gz
+*.log
+.db_restored
+
+# Allow the start/ directory and its contents (seed backups committed to git)
+!start/
+!start/**
