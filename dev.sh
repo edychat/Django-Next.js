@@ -44,13 +44,12 @@
 # ║    ./dev.sh backup list          List all backups (start/ and local)        ║
 # ║                                                                             ║
 # ║  TEMPLATE SYNC                                                              ║
-# ║    ./dev.sh sync                 Interactive sync from Django-Next.js repo  ║
+# ║    ./dev.sh sync                 Pull latest template → this project        ║
 # ║    ./dev.sh sync --dry-run       Show what would change, no writes          ║
-# ║    ./dev.sh sync --yes           Auto-accept all changes (CI mode)          ║
-# ║    ./dev.sh push-template        Push this project's template files to a    ║
-# ║                                    local clone of the template repo so you  ║
-# ║                                    can review, commit, and push manually    ║
-# ║    ./dev.sh push-template --dir <path>  Use a custom clone directory        ║
+# ║    ./dev.sh sync --yes           Auto-accept all (CI mode)                  ║
+# ║    ./dev.sh sync push            Push this project's template files →       ║
+# ║                                    /Users/3du/Django-Next.js for review     ║
+# ║    ./dev.sh sync push --dir <p>  Use a different local clone path           ║
 # ╚═════════════════════════════════════════════════════════════════════════════╝
 #
 # ── Windows polyglot bootstrap ────────────────────────────────────────────────
@@ -2886,13 +2885,18 @@ _run_sync() {
   _sha=$(echo "$_tree" | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha','?')[:7])" 2>/dev/null)
   echo -e "   Repo at commit ${C}${_sha}${Z}"
 
-  # All blob paths in the template
+  # All blob paths in the template, sorted by two-level group for clean display
   local _template_files
   _template_files=$(echo "$_tree" | python3 -c "
 import json, sys
-for i in json.load(sys.stdin).get('tree', []):
-    if i.get('type') == 'blob':
-        print(i['path'])
+def grp(p):
+    parts = p.split('/')
+    if len(parts) == 1: return ('root', p)
+    if len(parts) == 2: return (parts[0], p)
+    return (parts[0]+'/'+parts[1], p)
+files = [i['path'] for i in json.load(sys.stdin).get('tree', []) if i.get('type') == 'blob']
+files.sort(key=grp)
+print('\n'.join(files))
 ")
 
   # ── Helpers ────────────────────────────────────────────────────────────────
@@ -3061,7 +3065,174 @@ PYEOF
   echo ""
 }
 
+# ── sync push (reverse sync) ──────────────────────────────────────────────────
+# Copies template-owned files FROM this project INTO the local template repo,
+# then opens it in your editor so you can review the diff and push yourself.
+#
+# Uses the same _SYNC_PROJECT_PATHS ownership rules as `sync pull` — any file
+# that `./dev.sh sync` would pull from the template is a candidate to push back.
+#
+# Usage:
+#   ./dev.sh sync push                  → /Users/3du/Django-Next.js (default)
+#   ./dev.sh sync push --dir <path>     → different local clone
+# ─────────────────────────────────────────────────────────────────────────────
+_run_push_template() {
+  local _clone_dir="/Users/3du/Django-Next.js"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) _clone_dir="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  local R='\033[0;31m' Y='\033[1;33m' G='\033[0;32m' C='\033[0;36m' B='\033[1m' Z='\033[0m'
+
+  command -v git     &>/dev/null || { echo "❌  git is required";    return 1; }
+  command -v python3 &>/dev/null || { echo "❌  python3 is required"; return 1; }
+
+  if [[ ! -d "$_clone_dir/.git" ]]; then
+    echo -e "${R}❌  No git repo found at ${_clone_dir}${Z}"
+    echo -e "   Clone it first:  git clone https://github.com/${_SYNC_TEMPLATE_REPO}.git ${_clone_dir}"
+    return 1
+  fi
+
+  # Warn about uncommitted changes already in the template repo
+  local _existing_changes
+  _existing_changes=$(git -C "$_clone_dir" status --porcelain 2>/dev/null)
+  if [[ -n "$_existing_changes" ]]; then
+    echo -e "${Y}⚠  Template repo already has uncommitted changes:${Z}"
+    echo "$_existing_changes" | sed 's/^/   /'
+    echo ""
+    read -r -p "   Continue and add on top of those? [y/N] " _ans
+    [[ "$_ans" =~ ^[Yy] ]] || { echo "Aborted."; return 0; }
+    echo ""
+  fi
+
+  local _clone_sha; _clone_sha=$(git -C "$_clone_dir" rev-parse --short HEAD 2>/dev/null)
+  echo -e "${B}📤  Pushing template files from this project → ${_clone_dir}${Z}"
+  echo -e "   Template at ${C}${_clone_sha}${Z}  |  Project: ${C}${ROOT_DIR}${Z}"
+  echo ""
+
+  # ── Get file list from the clone (source of truth for what's template-owned) ─
+  # Sort by group (two-level prefix) so headers print cleanly without repeating
+  local _template_files
+  _template_files=$(git -C "$_clone_dir" ls-files | python3 -c "
+import sys
+def grp(p):
+    parts = p.split('/')
+    if len(parts) == 1: return ('root', p)
+    if len(parts) == 2: return (parts[0], p)
+    return (parts[0]+'/'+parts[1], p)
+lines = [l.rstrip() for l in sys.stdin if l.strip()]
+lines.sort(key=lambda p: grp(p))
+print('\n'.join(lines))
+")
+
+  # ── Copy project → clone ───────────────────────────────────────────────────
+  local _total_copied=0 _total_skipped=0 _total_unchanged=0 _total_missing=0
+  local _prev_group=""
+
+  _push_is_project_owned() {
+    local _f="$1"
+    for _p in "${_SYNC_PROJECT_PATHS[@]}"; do
+      if [[ "$_p" == */ ]]; then
+        [[ "$_f" == "$_p"* ]] && return 0
+      else
+        [[ "$_f" == "$_p" ]] && return 0
+      fi
+    done
+    return 1
+  }
+
+  _push_group_for() {
+    local _parts; IFS='/' read -ra _parts <<< "$1"
+    case ${#_parts[@]} in
+      1) echo "root" ;;
+      2) echo "${_parts[0]}" ;;
+      *) echo "${_parts[0]}/${_parts[1]}" ;;
+    esac
+  }
+
+  while IFS= read -r _tf; do
+    local _group; _group=$(_push_group_for "$_tf")
+    if [[ "$_group" != "$_prev_group" ]]; then
+      echo -e "${B}━━━  ${_group}  ━━━${Z}"
+      _prev_group="$_group"
+    fi
+
+    if _push_is_project_owned "$_tf"; then
+      echo -e "   ${Y}⊘  project:   ${_tf}${Z}"
+      (( _total_skipped++ )); continue
+    fi
+
+    local _src="$ROOT_DIR/$_tf"
+    local _dst="$_clone_dir/$_tf"
+
+    if [[ ! -f "$_src" ]]; then
+      echo -e "   ${Y}?  not here:  ${_tf}  (template version kept)${Z}"
+      (( _total_missing++ )); continue
+    fi
+
+    if cmp -s "$_src" "$_dst" 2>/dev/null; then
+      echo -e "   ${G}✓  unchanged: ${_tf}${Z}"
+      (( _total_unchanged++ )); continue
+    fi
+
+    mkdir -p "$(dirname "$_dst")"
+    cp "$_src" "$_dst"
+    echo -e "   ${C}~  copied:    ${_tf}${Z}"
+    (( _total_copied++ ))
+
+  done <<< "$_template_files"
+
+  echo ""
+
+  # ── Summary + diff stat ────────────────────────────────────────────────────
+  local _diff_stat
+  _diff_stat=$(git -C "$_clone_dir" diff --stat 2>/dev/null)
+
+  echo -e "${B}━━━  Result  ━━━${Z}"
+  echo -e "   ${C}~  copied:    ${_total_copied}${Z}"
+  echo -e "   ${G}✓  unchanged: ${_total_unchanged}${Z}"
+  echo -e "   ${Y}⊘  project:   ${_total_skipped}${Z}"
+  [[ $_total_missing -gt 0 ]] && echo -e "   ${Y}?  not here:  ${_total_missing}${Z}"
+  echo ""
+
+  if [[ -z "$_diff_stat" ]] && [[ $_total_copied -eq 0 ]]; then
+    echo -e "${G}✅  Template clone is already up to date — nothing to commit.${Z}"
+    echo ""
+    return 0
+  fi
+
+  if [[ -n "$_diff_stat" ]]; then
+    echo -e "${B}━━━  Changed files  ━━━${Z}"
+    echo "$_diff_stat" | sed 's/^/   /'
+    echo ""
+  fi
+
+  # ── Open in editor ────────────────────────────────────────────────────────
+  echo -e "${B}━━━  Opening ${_clone_dir} in your editor...  ━━━${Z}"
+  if command -v cursor &>/dev/null; then
+    cursor "$_clone_dir" 2>/dev/null &
+  elif command -v code &>/dev/null; then
+    code "$_clone_dir" 2>/dev/null &
+  else
+    echo -e "   (no editor found — open ${_clone_dir} manually)"
+  fi
+
+  echo ""
+  echo -e "   Review the diff, then commit and push:"
+  echo -e "   ${C}cd ${_clone_dir}${Z}"
+  echo -e "   ${C}git diff${Z}                   # full diff"
+  echo -e "   ${C}git add -p${Z}                 # stage selectively"
+  echo -e "   ${C}git commit -m 'your msg'${Z}"
+  echo -e "   ${C}git push${Z}"
+  echo ""
+}
+
 CMD="${1:-}"
+
 
 if [[ "$CMD" == "setup" ]]; then
   run_setup
@@ -3069,19 +3240,18 @@ if [[ "$CMD" == "setup" ]]; then
 fi
 
 if [[ "$CMD" == "sync" ]]; then
-  _run_sync "${@:2}"
-  exit 0
-fi
-
-if [[ "$CMD" == "push-template" ]]; then
-  _run_push_template "${@:2}"
+  if [[ "${2:-}" == "push" ]]; then
+    _run_push_template "${@:3}"
+  else
+    _run_sync "${@:2}"
+  fi
   exit 0
 fi
 
 # Commands that don't need dependency checks or app discovery preamble
 _SKIP_SETUP=false
 case "$CMD" in
-  status|logs|down|stop|rebuild|disk|_status_only|service-logs|sync|push-template) _SKIP_SETUP=true ;;
+  status|logs|down|stop|rebuild|disk|_status_only|service-logs|sync) _SKIP_SETUP=true ;;
 esac
 
 # For `build <app> <platform> local` we don't need Podman at all
