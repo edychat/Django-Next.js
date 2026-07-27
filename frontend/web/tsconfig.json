@@ -25,7 +25,11 @@
     "paths": {
       "@/*": [
         "./*"
-      ]
+      ],
+      "@shared/api-client": ["./lib/api-client"],
+      "@shared/theme": ["./lib/theme"],
+      "@shared/utils": ["./lib/utils"],
+      "@shared/*": ["./lib/*"]
     }
   },
   "include": [

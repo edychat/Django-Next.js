@@ -2859,6 +2859,30 @@ _SYNC_PROJECT_PATHS=(
   "frontend/packages/"
 )
 
+# Merge extra protected paths from backend/project.py (SYNC_PROJECT_PATHS list).
+# Add project-specific paths there so this file stays a shared template.
+_extra_sync_paths=$(python3 - "$ROOT_DIR/backend/project.py" 2>/dev/null <<'EXTRACT_SYNC_EOF'
+import ast, sys, os
+src = sys.argv[1]
+try:
+    tree = ast.parse(open(src).read())
+except Exception:
+    sys.exit(0)
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assign):
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id == "SYNC_PROJECT_PATHS":
+                if isinstance(node.value, (ast.List, ast.Tuple)):
+                    for elt in node.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            print(elt.value)
+EXTRACT_SYNC_EOF
+)
+while IFS= read -r _extra_path; do
+  [[ -n "$_extra_path" ]] && _SYNC_PROJECT_PATHS+=("$_extra_path")
+done <<< "$_extra_sync_paths"
+unset _extra_sync_paths _extra_path
+
 _run_sync() {
   local _dry=false _yes=false
   for _a in "$@"; do

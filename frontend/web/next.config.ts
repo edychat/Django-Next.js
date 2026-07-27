@@ -19,24 +19,6 @@ const nextConfig: NextConfig = {
     '*.trycloudflare.com',
   ],
 
-  async headers() {
-    return [
-      {
-        source: '/nancy',
-        headers: [
-          { key: 'Cache-Control', value: 'no-store, no-cache, must-revalidate' },
-          { key: 'Pragma', value: 'no-cache' },
-        ],
-      },
-      {
-        source: '/resources/:path*',
-        headers: [
-          { key: 'Cache-Control', value: 'no-store, no-cache, must-revalidate' },
-        ],
-      },
-    ];
-  },
-
   webpack: (config, { dev }) => {
     if (dev) {
       // Polling is required on macOS (Podman/Docker VM) and Windows (WSL2)
@@ -45,11 +27,7 @@ const nextConfig: NextConfig = {
       config.watchOptions = {
         poll: 500,
         aggregateTimeout: 300,
-        ignored: [
-          '**/node_modules/**',
-          '**/.next/**',
-          '**/public/bookcovers/**',
-        ],
+        ignored: ['**/node_modules/**', '**/.next/**'],
       };
     }
     return config;
