@@ -3,6 +3,8 @@
 # Fully dynamic — no app names or ports are hardcoded.
 # Any folder in frontend/mobile/ with a package.json is picked up automatically.
 # APP_TYPE and METRO_PORT env vars are injected at runtime by dev.sh per app.
+#
+# This file is a shared template — keep it free of project-specific logic.
 
 # ── Dependency install stage ───────────────────────────────────────────────────
 FROM node:22-slim AS deps

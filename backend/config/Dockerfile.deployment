@@ -1,6 +1,12 @@
 # backend/config/Dockerfile.deployment
 # Lightweight production image with Gunicorn WSGI server
 # Uses non-root user, GCS backup support, no cron (use platform scheduler)
+#
+# This file is a shared template — keep it free of project-specific logic.
+# To extend it for a specific project, create <app>/Dockerfile that does:
+#   FROM ${BASE_IMAGE:-<project>-backend-base}
+# and add only what that app needs. See backend/project.py (COMPOSE_SERVICES) for the build overwrite (backend-base service + backend override).
+
 # ---------- Build Stage ----------
 FROM python:3.12.5-slim-bookworm AS python-build-stage
 WORKDIR /backend

@@ -281,6 +281,18 @@ tags
 dump.rdb
 
 ### Project template
+# Project-specific Django apps — never belong in the template repo
+backend/books/
+backend/cart/
+backend/orders/
+backend/payments/
+backend/drivers/
+backend/passengers/
+backend/rides/
+backend/communications/
+# Catch-all: any backend app dir that isn't part of the template scaffold
+# (config/ and backup/ are the only template-owned backend dirs)
+
 /media/
 
 # All backend media — uploads, imports, photoprism, chat media. Never commit.

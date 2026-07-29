@@ -3,6 +3,8 @@
 # Fully dynamic Dockerfile that works with any npm workspace structure.
 # No hardcoded package names or paths — discovers everything at build time.
 #
+# This file is a shared template — keep it free of project-specific logic.
+
 FROM node:20-alpine
 
 RUN apk add --no-cache curl bash
