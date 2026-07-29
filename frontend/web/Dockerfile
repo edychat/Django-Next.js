@@ -1,7 +1,11 @@
 # frontend/web/Dockerfile
-# 
+#
 # Fully dynamic Dockerfile that works with any npm workspace structure.
 # No hardcoded package names or paths — discovers everything at build time.
+#
+# Supports two layouts automatically:
+#   Workspace:  frontend/package.json  (workspaces: ["web", "mobile", ...])
+#   Simple:     frontend/web/package.json  (no root package.json)
 #
 # This file is a shared template — keep it free of project-specific logic.
 
@@ -17,10 +21,8 @@ RUN npm config set registry https://registry.npmjs.org/ && \
     npm config set fetch-retries 5 && \
     npm config set fetch-timeout 300000
 
-# Copy entire frontend tree, then strip everything except package*.json files.
-# This maximizes layer cache reuse — the layer only invalidates when a 
-# package.json or package-lock.json changes, not when source files change.
-# Works for any workspace structure without hardcoding paths.
+# Copy entire frontend tree, then strip everything except manifest files.
+# This maximises layer cache reuse — only invalidates when package files change.
 COPY frontend/ ./
 RUN find . -type f \
     ! -name "package.json" \
@@ -31,17 +33,27 @@ RUN find . -type f \
     -delete && \
     find . -type d -empty -delete
 
-# 1. Inject TypeScript path aliases into web/tsconfig.json so the
-#    compiler resolves @shared/* → ../shared/* without hardcoding them.
-#    Also strip mobile workspace so npm doesn't install Expo/RN deps.
+# Detect layout and prepare workspace:
+#   - Workspace layout: root package.json exists → strip mobile, patch tsconfig
+#   - Simple layout:    no root package.json    → nothing to patch, install from web/
 RUN node -e " \
   const fs = require('fs'); \
+  const path = require('path'); \
   \
-  const root = JSON.parse(fs.readFileSync('package.json', 'utf8')); \
+  const rootPkg = 'package.json'; \
+  const webPkg  = 'web/package.json'; \
+  \
+  if (!fs.existsSync(rootPkg)) { \
+    console.log('ℹ️  No root package.json — simple layout (web/ only)'); \
+    process.exit(0); \
+  } \
+  \
+  const root = JSON.parse(fs.readFileSync(rootPkg, 'utf8')); \
   \
   const tscPath = 'web/tsconfig.json'; \
   if (fs.existsSync(tscPath)) { \
     const tsc = JSON.parse(fs.readFileSync(tscPath, 'utf8')); \
+    tsc.compilerOptions = tsc.compilerOptions || {}; \
     tsc.compilerOptions.paths = { '@/*': ['./*'], '@shared/*': ['../shared/*'] }; \
     fs.writeFileSync(tscPath, JSON.stringify(tsc, null, 2) + '\n'); \
     console.log('✅ tsconfig: @shared/* → ../shared/*'); \
@@ -49,15 +61,25 @@ RUN node -e " \
   \
   if (root.workspaces) { \
     root.workspaces = root.workspaces.filter(w => !w.includes('mobile')); \
-    fs.writeFileSync('package.json', JSON.stringify(root, null, 2)); \
+    fs.writeFileSync(rootPkg, JSON.stringify(root, null, 2)); \
+    console.log('✅ Stripped mobile from workspaces'); \
   } \
 "
 
-# Install all workspace dependencies.
-RUN npm install --legacy-peer-deps && npm cache clean --force
+# Install dependencies.
+# Workspace layout: install from root (covers all workspaces including web/).
+# Simple layout:    install from web/ directly.
+RUN if [ -f package.json ]; then \
+      echo '📦 Workspace layout — installing from root...' && \
+      npm install --legacy-peer-deps && npm cache clean --force; \
+    elif [ -f web/package.json ]; then \
+      echo '📦 Simple layout — installing from web/...' && \
+      cd web && npm install --legacy-peer-deps && npm cache clean --force; \
+    else \
+      echo '❌ No package.json found'; exit 1; \
+    fi
 
-# NOTE: Source files are NOT copied here — they are mounted via volume at runtime.
-# This ensures the dev server always reads live files from the host.
+# NOTE: Source files are NOT copied here — mounted via volume at runtime.
 
 ENV NODE_ENV=development \
     HOST=0.0.0.0 \
@@ -72,31 +94,32 @@ ENV NODE_ENV=development \
 
 EXPOSE 3000
 
-# Auto-detect the web app directory and start the dev server.
-# Supports both "web" and "app" as common names, or falls back to the first
-# workspace that has a dev script.
+# Auto-detect the web directory and start the dev server.
+# Workspace layout: root package.json → find workspace named "web" or "app"
+# Simple layout:    no root package.json → start directly in /app/web
 CMD ["sh", "-c", "\
   echo '⏳ Waiting for source files...' && \
-  until [ -f /app/package.json ]; do sleep 1; done && \
-  echo '✅ Source mounted, detecting web workspace...' && \
-  WEB_DIR=$(node -e \" \
-    const fs = require('fs'); \
-    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); \
-    const workspaces = pkg.workspaces || []; \
-    for (const ws of workspaces) { \
-      const dir = ws.replace('/*', '').replace('*', ''); \
-      if (dir.includes('web') || dir.includes('app')) { \
-        console.log(dir); \
-        process.exit(0); \
+  until [ -f /app/web/package.json ] || [ -f /app/package.json ]; do sleep 1; done && \
+  echo '✅ Source mounted' && \
+  if [ -f /app/package.json ]; then \
+    WEB_DIR=$(node -e \" \
+      const fs = require('fs'); \
+      const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); \
+      const ws = pkg.workspaces || []; \
+      for (const w of ws) { \
+        const d = w.replace('/*','').replace('*',''); \
+        if (d.includes('web') || d.includes('app')) { console.log(d); process.exit(0); } \
       } \
-    } \
-    console.log('web'); \
-  \") && \
+      console.log('web'); \
+    \"); \
+  else \
+    WEB_DIR=web; \
+  fi && \
   cd /app/$WEB_DIR && \
-  if [ ! -f node_modules/.package-lock.json ] && [ ! -d node_modules/.bin ]; then \
-    echo '📦 Installing dependencies into volume...' && \
+  if [ ! -d node_modules/.bin ]; then \
+    echo '📦 Installing deps into volume...' && \
     npm install --legacy-peer-deps; \
   fi && \
-  echo \"🚀 Starting dev server in $WEB_DIR...\" && \
+  echo \"🚀 Starting Next.js dev server in $WEB_DIR...\" && \
   exec npm run dev \
 "]
