@@ -11,8 +11,10 @@
     "postinstall": "node -e \"try{require('fs').copyFileSync('node_modules/pdfjs-dist/build/pdf.worker.min.mjs','public/pdf.worker.min.mjs')}catch(e){}\""
   },
   "dependencies": {
+    "@stripe/react-stripe-js": "^6.8.0",
+    "@stripe/stripe-js": "^9.12.0",
     "graceful-fs": "^4.2.11",
-    "next": "^15.1.6",
+    "next": "^15.3.4",
     "pdfjs-dist": "^5.5.207",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
@@ -25,7 +27,7 @@
     "@types/react-dom": "^19",
     "baseline-browser-mapping": "^2.9.19",
     "eslint": "^9",
-    "eslint-config-next": "^15.1.6",
+    "eslint-config-next": "^15.3.4",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

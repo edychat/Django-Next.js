@@ -27,6 +27,9 @@ sdist/
 var/
 wheels/
 *.egg-info/
+# Never ignore frontend source lib folders
+!frontend/**/lib/
+!frontend/**/lib/**
 .installed.cfg
 *.egg
 

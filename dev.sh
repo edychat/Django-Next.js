@@ -48,60 +48,23 @@
 # ║    ./dev.sh sync --dry-run       Show what would change, no writes          ║
 # ║    ./dev.sh sync --yes           Auto-accept all (CI mode)                  ║
 # ║    ./dev.sh sync push            Push this project's template files →       ║
-# ║                                    /Users/3du/Django-Next.js for review     ║
-# ║    ./dev.sh sync push --dir <p>  Use a different local clone path           ║
+# ║                                    sibling Django-Next.js/ clone            ║
+# ║    ./dev.sh sync push --dir <p>  Use a specific local clone path            ║
 # ╚═════════════════════════════════════════════════════════════════════════════╝
 #
-# ── Windows polyglot bootstrap ────────────────────────────────────────────────
-: << 'BATCH_BOOTSTRAP_END'
-@echo off
-setlocal
-
-:: ── Find Git Bash ──────────────────────────────────────────────────────────
-set "BASH="
-if exist "C:\Program Files\Git\bin\bash.exe"         set "BASH=C:\Program Files\Git\bin\bash.exe"
-if "%BASH%"=="" if exist "%PROGRAMFILES%\Git\bin\bash.exe" set "BASH=%PROGRAMFILES%\Git\bin\bash.exe"
-if "%BASH%"=="" if exist "%LOCALAPPDATA%\Programs\Git\bin\bash.exe" set "BASH=%LOCALAPPDATA%\Programs\Git\bin\bash.exe"
-
-:: ── Search PATH for bash ────────────────────────────────────────────────────
-if "%BASH%"=="" (
-    for /f "delims=" %%i in ('where bash.exe 2^>nul') do (
-        if "%%~dpi" neq "C:\Windows\System32\" set "BASH=%%i" & goto :found_bash
-    )
-)
-:found_bash
-
-if "%BASH%"=="" (
-    echo.
-    echo  ERROR: Git Bash not found.
-    echo.
-    echo  Install Git for Windows from: https://git-scm.com/download/win
-    echo  Then re-run this script.
-    echo.
-    pause
-    exit /b 1
-)
-
-:: ── Convert Windows path to Unix path (C:\foo\bar -> /c/foo/bar) ───────────
-set "WIN_DIR=%~dp0"
-if "%WIN_DIR:~-1%"=="\" set "WIN_DIR=%WIN_DIR:~0,-1%"
-:: Replace backslashes with forward slashes
-set "UNIX_DIR=%WIN_DIR:\=/%"
-:: Replace drive letter: C:/... -> /c/...
-set "DRIVE=%UNIX_DIR:~0,1%"
-set "REST=%UNIX_DIR:~2%"
-:: Lowercase the drive letter via a lookup
-for %%L in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
-    if /i "%DRIVE%"=="%%L" set "DRIVE=%%L"
-)
-set "UNIX_DIR=/%DRIVE%%REST%"
-
-echo Running dev.sh via Git Bash...
-"%BASH%" --login -c "cd '%UNIX_DIR%' && bash '%UNIX_DIR%/dev.sh' %*"
-exit /b %ERRORLEVEL%
-
-BATCH_BOOTSTRAP_END
-# ── End Windows bootstrap (bash resumes here) ─────────────────────────────────
+# ── Windows ───────────────────────────────────────────────────────────────────
+#
+#   On Windows run:  .\dev.ps1   (PowerShell — installs WSL2+Ubuntu, then calls
+#                                 this script inside Ubuntu automatically)
+#
+#   Sync on Windows: .\dev.ps1 sync [--dry-run] [--yes]
+#                    .\dev.ps1 sync push          (auto-detects sibling Django-Next.js/)
+#                    .\dev.ps1 sync push --dir <path>  (explicit path)
+#                    (skips full bootstrap — goes straight to WSL2, fast)
+#
+#   macOS / Linux:   ./dev.sh    (bash — runs directly, no wrapper needed)
+#
+# ─────────────────────────────────────────────────────────────────────────────
 
 set -eo pipefail
 
@@ -987,11 +950,21 @@ run_setup() {
 
       if ! command -v podman-compose &>/dev/null; then
         echo "📦 Installing podman-compose..."
-        if command -v pip3 &>/dev/null; then pip3 install --user podman-compose
-        elif command -v pip &>/dev/null; then pip install --user podman-compose
-        else echo "❌ pip not found. Install Python first."; exit 1
+        # Ubuntu 24.04+ (PEP 668) blocks pip install without --break-system-packages.
+        # Try pipx first (cleanest), then pip with the flag, then plain pip.
+        if ! command -v pipx &>/dev/null; then
+          sudo apt-get install -y -qq pipx 2>/dev/null || true
+        fi
+        if command -v pipx &>/dev/null; then
+          pipx install podman-compose 2>/dev/null || true
+        fi
+        if ! command -v podman-compose &>/dev/null; then
+          pip3 install --user --break-system-packages podman-compose 2>/dev/null \
+            || pip3 install --user podman-compose 2>/dev/null \
+            || pip install --user podman-compose 2>/dev/null || true
         fi
         export PATH="$HOME/.local/bin:$PATH"
+        echo "✅ podman-compose installed"
       else
         echo "✅ podman-compose already installed"
       fi
@@ -1039,89 +1012,55 @@ run_setup() {
         echo "✅ cloudflared already installed"
       fi
 
+      # Configure Podman to search Docker Hub for unqualified image names
+      # (e.g. "postgres:17" instead of "docker.io/library/postgres:17")
+      sudo mkdir -p /etc/containers/registries.conf.d
+      if ! grep -q 'docker.io' /etc/containers/registries.conf.d/docker.conf 2>/dev/null; then
+        echo 'unqualified-search-registries = ["docker.io"]' \
+          | sudo tee /etc/containers/registries.conf.d/docker.conf >/dev/null
+        echo "✅ Podman registry configured (docker.io)"
+      fi
+
       # Enable systemd lingering so rootless Podman containers survive terminal close
       _ensure_lingering
       ;;
 
     windows)
-      echo "🪟 Windows detected (Git Bash / MSYS2)"
+      # ── Strategy: this block runs from Git Bash on Windows ────────────────
+      # The real Windows entry point is the PowerShell section at the top of
+      # this file (.\dev.sh from PowerShell) which handles Git + WSL2 install
+      # before bash is even available. If we get here it means Git Bash is
+      # already running, so WSL2 Ubuntu may or may not be installed yet.
+      echo "🪟 Windows detected (Git Bash)"
 
-      # ── Strategy: run dev.sh inside WSL2 Ubuntu (same as macOS uses Apple VM) ─
-      # On macOS, Podman uses Apple Hypervisor to run a Linux VM — containers live
-      # there. On Shadow PC (Hyper-V cloud VM) we can't nest another VM, but WSL2
-      # IS already the Linux kernel. So we install Podman natively inside WSL2
-      # Ubuntu and re-exec the entire dev.sh there. No 'podman machine' needed.
-      # Architecture: Windows Git Bash → WSL2 Ubuntu → rootless Podman → containers.
-
-      # ── Step 1: Minimal Windows-side tools (git, node for Expo CLI) ──────
-      if ! command -v scoop &>/dev/null; then
-        echo "📦 Installing Scoop (package manager)..."
-        _scoop_ps1="${HOME}/AppData/Local/Temp/install_scoop.ps1"
-        _scoop_ps1_win=$(cygpath -w "$_scoop_ps1" 2>/dev/null || echo "")
-        curl -fsSL "https://get.scoop.sh" -o "$_scoop_ps1"
-        _is_admin=$(powershell.exe -NoProfile -NonInteractive -Command \
-          "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)" \
-          2>/dev/null | tr -d '\r\n')
-        if [[ "$_is_admin" == "True" ]]; then
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_scoop_ps1_win" -RunAsAdmin
-        else
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_scoop_ps1_win"
-        fi
-        rm -f "$_scoop_ps1"
-        export PATH="$HOME/scoop/shims:$PATH"
-        command -v scoop &>/dev/null || { echo "❌ Scoop install failed."; exit 1; }
-        echo "✅ Scoop installed"
-      else
-        export PATH="$HOME/scoop/shims:$PATH"
-        echo "✅ Scoop already installed"
-      fi
-      scoop bucket add extras 2>/dev/null || true
-      _scoop_install() {
-        local pkg="$1" cmd="${2:-$1}"
-        if ! command -v "$cmd" &>/dev/null; then
-          echo "📦 Installing $pkg..."
-          scoop install "$pkg" && export PATH="$HOME/scoop/shims:$PATH"
-        else
-          echo "✅ $cmd already installed"
-        fi
-      }
-      _scoop_install git git
-      _scoop_install nodejs-lts node
-
-      # ── Step 2: Ensure WSL2 + Ubuntu distro is installed ─────────────────
+      # ── Step 1: Ensure WSL2 + Ubuntu is installed ─────────────────────────
       _wsl_has_ubuntu=false
       if wsl.exe -l --quiet 2>/dev/null | tr -d '\0\r\n ' | grep -qi "Ubuntu"; then
         _wsl_has_ubuntu=true
         echo "✅ WSL2 Ubuntu already installed"
       else
-        echo "📦 Installing WSL2 + Ubuntu..."
-        echo "   (One-time setup. Ubuntu is the Linux runtime for Podman, same as macOS.)"
+        echo "📦 Installing WSL2 + Ubuntu (one-time ~2 min, UAC prompt may appear)..."
 
-        # Try installing directly first (works on Win11 22H2+ without elevation)
+        # Try directly first — works on Win11 22H2+ without elevation
         wsl.exe --install -d Ubuntu --no-launch 2>/dev/null | tr -d '\r' || true
 
-        # Wait up to 120s for the distro to register
         local _w=0
         while [[ $_w -lt 120 ]]; do
-          if wsl.exe -l --quiet 2>/dev/null | tr -d '\0\r\n ' | grep -qi "Ubuntu"; then
-            _wsl_has_ubuntu=true; break
-          fi
+          wsl.exe -l --quiet 2>/dev/null | tr -d '\0\r\n ' | grep -qi "Ubuntu" \
+            && { _wsl_has_ubuntu=true; break; }
           sleep 3; _w=$((_w+3))
         done
 
-        # If still not registered, try with elevation via PowerShell
+        # Retry with elevation if still not registered
         if [[ "$_wsl_has_ubuntu" == "false" ]]; then
-          echo "   Retrying with elevated privileges (UAC prompt may appear)..."
+          echo "   Retrying with elevated privileges (UAC prompt will appear)..."
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \
             "Start-Process wsl.exe -ArgumentList '--install -d Ubuntu --no-launch' \
              -Verb RunAs -Wait -WindowStyle Normal" 2>/dev/null | tr -d '\r' || true
-
-          # Wait another 120s
           _w=0
-          while [[ $_w -lt 120 ]]; do
-            if wsl.exe -l --quiet 2>/dev/null | tr -d '\0\r\n ' | grep -qi "Ubuntu"; then
-              _wsl_has_ubuntu=true; break
-            fi
+          while [[ $_w -lt 180 ]]; do
+            wsl.exe -l --quiet 2>/dev/null | tr -d '\0\r\n ' | grep -qi "Ubuntu" \
+              && { _wsl_has_ubuntu=true; break; }
             sleep 3; _w=$((_w+3))
           done
         fi
@@ -1129,98 +1068,126 @@ run_setup() {
         if [[ "$_wsl_has_ubuntu" == "false" ]]; then
           echo ""
           echo "❌ Ubuntu did not appear after install."
-          echo "   This usually means WSL2 needs to be enabled first."
-          echo ""
-          echo "   Run this in PowerShell (as Admin), then restart your PC:"
+          echo "   WSL2 may need a reboot to activate. Run in Admin PowerShell:"
           echo "     wsl --install -d Ubuntu"
-          echo ""
-          echo "   After restart, re-run: ./dev.sh"
+          echo "   Then restart your PC and re-run: ./dev.sh"
           exit 1
         fi
+        echo "✅ WSL2 + Ubuntu installed"
       fi
 
-      # ── Step 2b: Ensure Ubuntu has completed first-boot initialisation ────
-      # A freshly installed distro shows in `wsl -l` but isn't yet ready to run
-      # commands (the rootfs is still being extracted). Force init now so that
-      # Step 3's `wsl -d Ubuntu -- bash` calls don't silently fail.
-      echo "🔄 Initialising Ubuntu (first boot may take ~30 s)..."
-      local _init_ok=false
-      local _init_w=0
-      while [[ $_init_w -lt 180 ]]; do
-        if wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>/dev/null | grep -q "ready"; then
-          _init_ok=true; break
-        fi
+      # ── Step 2: Wait for Ubuntu first-boot (rootfs extraction ~30 s) ──────
+      echo "🔄 Checking Ubuntu is ready..."
+      local _init_ok=false _init_w=0
+      while [[ $_init_w -lt 240 ]]; do
+        wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>/dev/null \
+          | grep -q "ready" && { _init_ok=true; break; }
         sleep 5; _init_w=$((_init_w+5))
+        (( _init_w % 30 == 0 )) && echo "   Still initialising... (${_init_w}s)"
       done
 
       if [[ "$_init_ok" == "false" ]]; then
-        # Ubuntu may be waiting for a first-launch user/password prompt in the
-        # background. Set a default root login so it can run unattended.
-        echo "   Setting Ubuntu to use root by default (unattended mode)..."
+        # Stuck on interactive first-launch prompt — set root as default user
+        echo "   Setting Ubuntu default user to root (unattended mode)..."
         powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \
           "ubuntu.exe config --default-user root" 2>/dev/null | tr -d '\r' || true
         wsl.exe --terminate Ubuntu 2>/dev/null || true
         sleep 3
-        # One final check
         if ! wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>/dev/null | grep -q "ready"; then
           echo ""
-          echo "❌ Ubuntu initialised but won't respond."
-          echo "   Open a new terminal and run:  ubuntu.exe"
-          echo "   Complete the setup (create a user), then re-run: ./dev.sh"
+          echo "❌ Ubuntu won't respond. Run:  wsl -d Ubuntu"
+          echo "   Complete the first-launch setup, then re-run: ./dev.sh"
           exit 1
         fi
       fi
       echo "✅ WSL2 Ubuntu ready"
 
-      # ── Step 3: Bootstrap Podman + tools inside WSL2 Ubuntu ──────────────
-      echo "🐧 Checking Podman inside WSL2 Ubuntu..."
+      # ── Step 3: Bootstrap tools inside WSL2 (idempotent) ─────────────────
+      echo "🐧 Installing tools inside WSL2..."
       wsl.exe -d Ubuntu -- bash -c '
+        set -e
         export DEBIAN_FRONTEND=noninteractive
+
+        _apt_install() {
+          for pkg in "$@"; do
+            dpkg -s "$pkg" &>/dev/null || MISSING="$MISSING $pkg"
+          done
+          [ -z "$MISSING" ] && return 0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq $MISSING
+        }
+
+        # Core tools
+        _apt_install curl ca-certificates gnupg
+
+        # Node.js LTS (via NodeSource) — needed for Expo/Metro
+        if ! command -v node &>/dev/null; then
+          echo "📦 Installing Node.js LTS..."
+          curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - 2>/dev/null
+          sudo apt-get install -y -qq nodejs
+          echo "✅ Node.js $(node --version)"
+        else
+          echo "✅ Node.js $(node --version)"
+        fi
+
         # Podman
         if ! command -v podman &>/dev/null; then
-          echo "📦 Installing Podman in WSL2..."
-          sudo apt-get update -qq 2>/dev/null
-          sudo apt-get install -y -qq podman 2>/dev/null \
-            || { sudo apt-get install -y -qq curl gpg && \
-                 curl -fsSL https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_22.04/Release.key \
-                   | sudo gpg --dearmor -o /usr/share/keyrings/podman.gpg && \
-                 echo "deb [signed-by=/usr/share/keyrings/podman.gpg] https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_22.04 /" \
-                   | sudo tee /etc/apt/sources.list.d/podman.list && \
-                 sudo apt-get update -qq && sudo apt-get install -y -qq podman; }
-          echo "✅ Podman $(podman --version) installed in WSL2"
+          echo "📦 Installing Podman..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman 2>/dev/null || {
+            # Fallback: kubic repository
+            curl -fsSL https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_22.04/Release.key \
+              | sudo gpg --dearmor -o /usr/share/keyrings/podman.gpg
+            echo "deb [signed-by=/usr/share/keyrings/podman.gpg] https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_22.04 /" \
+              | sudo tee /etc/apt/sources.list.d/podman.list
+            sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          }
+          echo "✅ Podman $(podman --version)"
         else
-          echo "✅ Podman already in WSL2 ($(podman --version))"
+          echo "✅ Podman $(podman --version)"
         fi
+
         # podman-compose
         if ! command -v podman-compose &>/dev/null; then
-          echo "📦 Installing podman-compose in WSL2..."
+          echo "📦 Installing podman-compose..."
           sudo apt-get install -y -qq python3-pip 2>/dev/null || true
-          pip3 install --user --quiet podman-compose 2>/dev/null \
-            || pip install --user --quiet podman-compose 2>/dev/null || true
-          echo "✅ podman-compose installed in WSL2"
+          pip3 install --user -q podman-compose 2>/dev/null \
+            || pip install --user -q podman-compose 2>/dev/null || true
+          echo "✅ podman-compose installed"
+        else
+          echo "✅ podman-compose ready"
         fi
+
         # cloudflared
         if ! command -v cloudflared &>/dev/null; then
+          echo "📦 Installing cloudflared..."
           curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-            | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null 2>&1
+            | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared jammy main" \
-            | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null 2>&1
-          sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq cloudflared 2>/dev/null || true
+            | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq cloudflared 2>/dev/null || true
+          echo "✅ cloudflared installed"
+        else
+          echo "✅ cloudflared ready"
         fi
+
+        # git (usually pre-installed in Ubuntu, but ensure it)
+        command -v git &>/dev/null || sudo apt-get install -y -qq git
+        command -v python3 &>/dev/null || sudo apt-get install -y -qq python3
+
+        echo "✅ WSL2 tools ready"
       ' || true
 
-      # ── Step 4: Re-exec dev.sh inside WSL2 — all containers run there ────
-      # Convert Windows path → WSL2 path  (C:\Users\Shadow\... → /mnt/c/Users/Shadow/...)
+      # ── Step 4: Re-exec dev.sh inside WSL2 ───────────────────────────────
+      # All containers run inside WSL2 (same role as the Apple Hypervisor VM on
+      # macOS). From here the Linux path takes over completely — nothing below
+      # this exec line runs on Windows.
       echo ""
-      echo "🔀 Switching to WSL2 Linux environment (same as macOS uses its Linux VM)..."
-      _wsl_root=$(wsl.exe -d Ubuntu -- wslpath -a "$(cygpath -w "$ROOT_DIR")" 2>/dev/null | tr -d '\r\n')
-      if [[ -z "$_wsl_root" ]]; then
-        _wsl_root=$(echo "$ROOT_DIR" | sed 's|^/\([a-z]\)/|/mnt/\1/|')
-      fi
-      # Pass all original arguments through; the WSL2 Linux path takes over fully
+      echo "🔀 Switching to WSL2 Linux environment..."
+      _wsl_root=$(wsl.exe -d Ubuntu -- wslpath -a "$(cygpath -w "$ROOT_DIR" 2>/dev/null || echo "$ROOT_DIR")" 2>/dev/null | tr -d '\r\n')
+      [[ -z "$_wsl_root" ]] && _wsl_root=$(echo "$ROOT_DIR" | sed 's|^/\([a-z]\)/|/mnt/\1/|')
       exec wsl.exe -d Ubuntu -- bash -c \
         "export PATH=\"\$HOME/.local/bin:\$PATH\"; cd '${_wsl_root}' && bash dev.sh $(printf '%q ' "$@")"
-      # exec replaces this process — nothing below this line runs on Windows
       ;;
 
     *)
@@ -2840,6 +2807,14 @@ _SYNC_TEMPLATE_REPO="Ezodis/Django-Next.js"
 # Path prefixes (or exact paths) that belong to THIS project, not the template.
 # Use trailing / for directories, exact path for single files.
 # These are skipped even if the template repo contains them.
+#
+# Rule of thumb:
+#   - backend/<app>/     → any Django app dir with an __init__.py
+#   - backend/project.py → project-specific settings/compose overrides
+#   - backend/media/     → user-uploaded files, never in the template
+#   - frontend/web/app/  → Next.js pages, layouts, components (project code)
+#   - frontend/web/public/ → project assets (images, fonts, etc.)
+#   Note: frontend/mobile/<appname>/ is handled dynamically via project.py
 _SYNC_PROJECT_PATHS=(
   # backend — app code and project-specific config
   "backend/project.py"          # settings + COMPOSE_SERVICES for this project
@@ -2847,16 +2822,10 @@ _SYNC_PROJECT_PATHS=(
   "backend/cart/"               # project app
   "backend/orders/"             # project app
   "backend/payments/"           # project app
-  "backend/media/"              # uploaded files
-  # frontend/web — app code (scaffold starters in template are replaced by project)
-  "frontend/web/app/"           # Next.js pages, components, contexts
-  "frontend/web/lib/"           # project utilities
-  "frontend/web/public/"        # project assets
-  # frontend/mobile — project-specific screens and logic
-  "frontend/mobile/app/"
-  "frontend/mobile/lib/"
-  # frontend/packages — deleted in this project, do not recreate
-  "frontend/packages/"
+  "backend/media/"              # uploaded files (never in template)
+  # frontend/web — project pages and assets
+  "frontend/web/app/"           # Next.js pages, layouts, components (project code)
+  "frontend/web/public/"        # project assets (images, icons, bookcovers, etc.)
 )
 
 # Merge extra protected paths from backend/project.py (SYNC_PROJECT_PATHS list).
@@ -3097,11 +3066,32 @@ PYEOF
 # that `./dev.sh sync` would pull from the template is a candidate to push back.
 #
 # Usage:
-#   ./dev.sh sync push                  → /Users/3du/Django-Next.js (default)
-#   ./dev.sh sync push --dir <path>     → different local clone
+#   ./dev.sh sync push                  → auto-detected sibling Django-Next.js clone
+#   ./dev.sh sync push --dir <path>     → use a specific local clone path
 # ─────────────────────────────────────────────────────────────────────────────
 _run_push_template() {
-  local _clone_dir="/Users/3du/Django-Next.js"
+  # Auto-detect the template repo clone — no --dir needed in typical setups.
+  # Search order:
+  #   1. Sibling directory named "Django-Next.js" (works when all projects sit
+  #      in the same parent folder, e.g. C:\edy.chat\ or ~/projects/)
+  #   2. ~/Django-Next.js  (legacy macOS default)
+  local _parent_dir; _parent_dir="$(dirname "$ROOT_DIR")"
+  local _clone_dir=""
+  local _repo_dirname; _repo_dirname=$(basename "$_SYNC_TEMPLATE_REPO")  # Django-Next.js
+
+  # Candidate locations in priority order
+  local _candidates=(
+    "$_parent_dir/$_repo_dirname"
+    "$HOME/$_repo_dirname"
+  )
+  for _c in "${_candidates[@]}"; do
+    if [[ -d "$_c/.git" ]]; then
+      _clone_dir="$_c"
+      break
+    fi
+  done
+  # Default to sibling path even if it doesn't exist yet (error message below will guide)
+  [[ -z "$_clone_dir" ]] && _clone_dir="$_parent_dir/$_repo_dirname"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3121,15 +3111,12 @@ _run_push_template() {
     return 1
   fi
 
-  # Warn about uncommitted changes already in the template repo
+  # Show uncommitted changes already in the template repo (informational only — no prompt)
   local _existing_changes
   _existing_changes=$(git -C "$_clone_dir" status --porcelain 2>/dev/null)
   if [[ -n "$_existing_changes" ]]; then
-    echo -e "${Y}⚠  Template repo already has uncommitted changes:${Z}"
+    echo -e "${Y}ℹ  Template repo has uncommitted changes — will overwrite with project files:${Z}"
     echo "$_existing_changes" | sed 's/^/   /'
-    echo ""
-    read -r -p "   Continue and add on top of those? [y/N] " _ans
-    [[ "$_ans" =~ ^[Yy] ]] || { echo "Aborted."; return 0; }
     echo ""
   fi
 
@@ -3138,24 +3125,75 @@ _run_push_template() {
   echo -e "   Template at ${C}${_clone_sha}${Z}  |  Project: ${C}${ROOT_DIR}${Z}"
   echo ""
 
-  # ── Get file list from the clone (source of truth for what's template-owned) ─
-  # Sort by group (two-level prefix) so headers print cleanly without repeating
-  local _template_files
-  _template_files=$(git -C "$_clone_dir" ls-files | python3 -c "
-import sys
+  # ── Build the file list from the PROJECT (not the template clone) ─────────
+  # This ensures new files (e.g. dev.ps1) that don't exist in the template yet
+  # are also pushed. We skip directories/files that are project-owned, git-
+  # ignored in the project, or in well-known skip dirs.
+  #
+  # We still read the template clone's git ls-files so we can mark files that
+  # exist in the template but are missing from the project ("not here").
+  local _clone_files
+  _clone_files=$(git -C "$_clone_dir" ls-files 2>/dev/null || true)
+
+  # Build the combined file list: union of clone files + project files,
+  # sorted by two-level group for clean display.
+  local _all_files
+  _all_files=$(python3 - "$ROOT_DIR" "$_clone_dir" <<'PYEOF'
+import sys, os
+
+root       = sys.argv[1]
+clone_dir  = sys.argv[2]
+
+SKIP_DIRS = {
+    '.git', '__pycache__', 'node_modules', '.expo', 'staticfiles',
+    'migrations', 'venv', '.venv', 'dist', 'build', '.next', 'coverage',
+    'media', 'backup', '.docker', 'builds', '.pytest_cache',
+}
+SKIP_FILES = {'.env', '.env.local', '.env.production', '.db_restored'}
+
+def walk_project(root):
+    results = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune skipped dirs in-place
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fname in filenames:
+            if fname in SKIP_FILES:
+                continue
+            full = os.path.join(dirpath, fname)
+            rel  = os.path.relpath(full, root).replace(os.sep, '/')
+            results.append(rel)
+    return results
+
+# Clone files (may include files not present in project)
+clone_set = set()
+try:
+    clone_set = set(open(os.path.join(clone_dir, '.git', 'info', 'exclude')).read().splitlines())
+except Exception:
+    pass
+try:
+    import subprocess
+    out = subprocess.check_output(['git', '-C', clone_dir, 'ls-files'], text=True)
+    clone_set = set(out.splitlines())
+except Exception:
+    pass
+
+project_files = set(walk_project(root))
+all_files = project_files | clone_set
+
 def grp(p):
     parts = p.split('/')
     if len(parts) == 1: return ('root', p)
     if len(parts) == 2: return (parts[0], p)
     return (parts[0]+'/'+parts[1], p)
-lines = [l.rstrip() for l in sys.stdin if l.strip()]
-lines.sort(key=lambda p: grp(p))
-print('\n'.join(lines))
-")
+
+sorted_files = sorted(all_files, key=grp)
+print('\n'.join(sorted_files))
+PYEOF
+)
 
   # ── Copy project → clone ───────────────────────────────────────────────────
   local _total_copied=0 _total_skipped=0 _total_unchanged=0 _total_missing=0
-  local _prev_group=""
+  local _total_new=0 _prev_group=""
 
   _push_is_project_owned() {
     local _f="$1"
@@ -3179,6 +3217,7 @@ print('\n'.join(lines))
   }
 
   while IFS= read -r _tf; do
+    [[ -z "$_tf" ]] && continue
     local _group; _group=$(_push_group_for "$_tf")
     if [[ "$_group" != "$_prev_group" ]]; then
       echo -e "${B}━━━  ${_group}  ━━━${Z}"
@@ -3193,11 +3232,21 @@ print('\n'.join(lines))
     local _src="$ROOT_DIR/$_tf"
     local _dst="$_clone_dir/$_tf"
 
+    # File exists in template clone but not in this project — keep template version
     if [[ ! -f "$_src" ]]; then
       echo -e "   ${Y}?  not here:  ${_tf}  (template version kept)${Z}"
       (( _total_missing++ )); continue
     fi
 
+    # New file — doesn't exist in clone yet
+    if [[ ! -f "$_dst" ]]; then
+      mkdir -p "$(dirname "$_dst")"
+      cp "$_src" "$_dst"
+      echo -e "   ${C}+  new file:  ${_tf}${Z}"
+      (( _total_new++ )); (( _total_copied++ )); continue
+    fi
+
+    # Existing file — check if changed
     if cmp -s "$_src" "$_dst" 2>/dev/null; then
       echo -e "   ${G}✓  unchanged: ${_tf}${Z}"
       (( _total_unchanged++ )); continue
@@ -3205,10 +3254,10 @@ print('\n'.join(lines))
 
     mkdir -p "$(dirname "$_dst")"
     cp "$_src" "$_dst"
-    echo -e "   ${C}~  copied:    ${_tf}${Z}"
+    echo -e "   ${C}~  updated:   ${_tf}${Z}"
     (( _total_copied++ ))
 
-  done <<< "$_template_files"
+  done <<< "$_all_files"
 
   echo ""
 
@@ -3217,7 +3266,8 @@ print('\n'.join(lines))
   _diff_stat=$(git -C "$_clone_dir" diff --stat 2>/dev/null)
 
   echo -e "${B}━━━  Result  ━━━${Z}"
-  echo -e "   ${C}~  copied:    ${_total_copied}${Z}"
+  echo -e "   ${C}+  new files: ${_total_new}${Z}"
+  echo -e "   ${C}~  updated:   $(( _total_copied - _total_new ))${Z}"
   echo -e "   ${G}✓  unchanged: ${_total_unchanged}${Z}"
   echo -e "   ${Y}⊘  project:   ${_total_skipped}${Z}"
   [[ $_total_missing -gt 0 ]] && echo -e "   ${Y}?  not here:  ${_total_missing}${Z}"
@@ -3265,7 +3315,9 @@ fi
 
 if [[ "$CMD" == "sync" ]]; then
   if [[ "${2:-}" == "push" ]]; then
+    set +e
     _run_push_template "${@:3}"
+    set -e
   else
     _run_sync "${@:2}"
   fi
@@ -3375,6 +3427,41 @@ _measure_podman_storage_kb() {
   echo $(( _machine_size + _storage_size ))
 }
 
+# ── Helper: cross-platform total Podman storage in KB ────────────────────────
+# On macOS: sums the VM disk image + containers/storage on the host filesystem.
+# On Linux/WSL: uses `podman system df` which reports actual on-disk usage
+#               (images reclaimable + volumes + build cache).
+# Returns 0 if Podman is not running or nothing is found.
+_measure_total_podman_storage_kb() {
+  case "$OS" in
+    mac)
+      _measure_podman_storage_kb
+      ;;
+    linux|wsl)
+      # Sum the SIZE column (field 4) from `podman system df`:
+      #   TYPE          TOTAL  ACTIVE  SIZE    RECLAIMABLE
+      #   Images        6      2       281MB   168MB (59%)
+      #   Containers    3      1       0B      0B (0%)
+      #   Local Volumes 1      1       22B     0B (0%)
+      podman system df 2>/dev/null | awk '
+        function parse(s,   n,u) {
+          n = s + 0; u = s
+          gsub(/[0-9.]+/, "", u)
+          if      (u ~ /[Gg]B?$/) return int(n * 1024 * 1024)
+          else if (u ~ /[Mm]B?$/) return int(n * 1024)
+          else if (u ~ /[Kk]B?$/) return int(n)
+          else                    return int(n / 1024)
+        }
+        NR > 1 && NF >= 4 { total += parse($4) }
+        END { print total + 0 }
+      ' || echo 0
+      ;;
+    *)
+      echo 0
+      ;;
+  esac
+}
+
 # ── Helper: measure project-level Podman storage (images + volumes) ───────────
 # Returns size in KB. Uses multiple methods with fallbacks for reliability.
 _measure_project_storage_kb() {
@@ -3461,11 +3548,10 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
   fi
 
   if [[ "$_DOWN_ALL" == "true" ]]; then
-    # Capture disk usage before cleanup
+    # Capture disk usage before cleanup (cross-platform: mac uses VM disk files,
+    # linux/wsl uses `podman system df` reclaimable totals)
     _SPACE_BEFORE=0
-    if [[ "$OS" == "mac" || "$OS" == "windows" ]]; then
-      _SPACE_BEFORE=$(_measure_podman_storage_kb)
-    fi
+    _SPACE_BEFORE=$(_measure_total_podman_storage_kb 2>/dev/null || echo 0)
     
     echo "🛑 Stopping ALL Podman services (all projects)..."
 
@@ -3482,7 +3568,15 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
     # Clean up traefik dynamic config directory
     rm -rf /tmp/traefik-dynamic 2>/dev/null || true
     
+    # On Linux/WSL: prune all images, volumes and build cache BEFORE killing
+    # Podman — podman system prune requires the daemon to be alive.
+    if [[ "$OS" == "linux" || "$OS" == "wsl" ]]; then
+      echo "🗑️  Pruning all Podman data (images, volumes, build cache)..."
+      podman system prune -a --volumes -f 2>/dev/null || true
+    fi
+
     # Kill all Podman processes immediately - fastest way to stop everything
+    # (macOS: kills the VM hypervisor; Linux/WSL: kills the Podman daemon)
     pkill -9 -f "vfkit.*podman-machine" 2>/dev/null || true
     pkill -9 -f "gvproxy.*podman-machine" 2>/dev/null || true
     pkill -9 podman 2>/dev/null || true
@@ -3598,15 +3692,17 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
 
     echo ""
     if [[ "$_DOWN_ALL" == "true" ]]; then
-      # Space freed = what was there before (it's all gone now)
+      # Everything was pruned before Podman was killed — all the space is gone.
+      # Use _SPACE_AFTER=0 so the delta equals everything that was measured before.
       _SPACE_AFTER=0
       _space_freed_kb=$(( _SPACE_BEFORE - _SPACE_AFTER ))
+      local _clean_msg="✅ All projects cleaned. Run ./dev.sh to start fresh."
       if [[ $_space_freed_kb -gt 0 ]]; then
-        echo "✅ All projects cleaned. Your Mac is now clean!"
+        echo "$_clean_msg"
         echo "💾 Space freed: $(_format_size_kb $_space_freed_kb)"
       else
-        echo "✅ All projects cleaned. Your Mac is now clean!"
-        echo "💾 Space freed: — (Podman machine was not running)"
+        echo "$_clean_msg"
+        echo "💾 Space freed: — (nothing found or Podman unavailable)"
       fi
     else
       # Measure storage after cleanup and report the difference

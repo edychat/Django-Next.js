@@ -115,9 +115,11 @@ services:
     environment:
       NODE_ENV: "development"
       NEXT_TELEMETRY_DISABLED: "1"
-      # NUMBER in ms, not "true" — "true" silently defaults to 5007ms (too slow).
-      # Polling is needed on macOS (Podman VM) and Windows (WSL2).
+      # Polling is REQUIRED on macOS (Podman VM) and Windows (WSL2) — inotify/
+      # FSEvents don't fire across the host→VM→container volume-mount boundary.
+      # WATCHPACK_POLLING must be a NUMBER in ms ("true" silently uses 5007ms).
       WATCHPACK_POLLING: "500"
+      WATCHPACK_POLLING_INTERVAL: "500"
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "500"
       NEXT_PUBLIC_URL: "http://${PROJECT_HOST}.localhost"
@@ -126,12 +128,9 @@ services:
       - ./frontend/web:/app:z
       - frontend_node_modules:/app/node_modules
       - frontend_next:/app/.next
-    # Expose port 3000 directly — HMR WebSocket connects back to the page
-    # hostname/port. When accessed via Traefik on port 80 the browser sends
-    # the WS upgrade to port 80, which Traefik forwards fine. But direct
-    # access on :3000 also works (useful for debugging / Windows WSL2 setups).
-    ports:
-      - "3000:3000"
+    # No host port binding — frontend is ONLY accessible via Traefik at
+    # http://${PROJECT_HOST}.localhost (port 80). Direct :3000 access is
+    # intentionally blocked so HMR WebSocket always goes through port 80.
     depends_on:
       backend:
         condition: service_healthy
@@ -151,29 +150,33 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik"
-      # ── HMR WebSocket router (highest priority, no compression middleware) ──
-      # Must be separate from the main frontend router — the compress middleware
-      # breaks WebSocket upgrade headers, killing hot reload in the browser.
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.rule=Host(`${PROJECT_HOST}.localhost`) && PathPrefix(`/_next/webpack-hmr`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.entrypoints=web"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.priority=200"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr.service=${COMPOSE_PROJECT_NAME}-frontend"
-      # HMR — tunnel hostname
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.rule=PathPrefix(`/_next/webpack-hmr`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.entrypoints=web"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.priority=150"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-hmr-tunnel.service=${COMPOSE_PROJECT_NAME}-frontend"
-      # ── Main frontend router ──────────────────────────────────────────────
+      # ── Frontend routers ──────────────────────────────────────────────────
+      # No compression middleware on ANY frontend router.
+      # Reason: Traefik applies middleware before inspecting whether a request
+      # is a WebSocket upgrade. The compress middleware rewrites headers in a
+      # way that prevents the Upgrade handshake from completing, killing HMR
+      # for BOTH the initial .localhost load and the tunnel hostname.
+      # Compression on a Next.js dev server is not worth the tradeoff anyway.
+      #
+      # passHostHeader=true ensures Next.js inside the container sees the real
+      # public Host header (e.g. "oldbook.ai.localhost", no port), so the HMR
+      # client script it injects into every page builds the WebSocket URL as:
+      #   ws://oldbook.ai.localhost/_next/webpack-hmr  (port 80 = Traefik) ✓
+      # instead of ws://oldbook.ai.localhost:3000/...  (unreachable from browser)
+      #
+      # .localhost hostname (high priority)
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.rule=Host(`${PROJECT_HOST}.localhost`)"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.entrypoints=web"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.priority=1"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.priority=10"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.service=${COMPOSE_PROJECT_NAME}-frontend"
-      # Frontend — tunnel / any other hostname (catch-all)
+      # Catch-all for tunnel and any other hostname
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.rule=PathPrefix(`/`)"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.entrypoints=web"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.priority=1"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend-tunnel.service=${COMPOSE_PROJECT_NAME}-frontend"
+      # ── Frontend service ──────────────────────────────────────────────────
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}-frontend.loadbalancer.server.port=3000"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-frontend.loadbalancer.passHostHeader=true"
     restart: unless-stopped
 
   eas-build:
