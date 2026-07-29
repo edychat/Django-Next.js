@@ -3319,7 +3319,9 @@ if [[ "$CMD" == "sync" ]]; then
     _run_push_template "${@:3}"
     set -e
   else
+    set +e
     _run_sync "${@:2}"
+    set -e
   fi
   exit 0
 fi
