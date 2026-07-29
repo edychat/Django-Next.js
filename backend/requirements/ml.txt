@@ -1,0 +1,2 @@
+# ML/Heavy dependencies — kept separate to preserve Docker layer cache
+# These rarely change, so they get their own cached layer
