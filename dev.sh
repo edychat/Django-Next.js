@@ -3270,6 +3270,17 @@ PYEOF
       (( _total_skipped++ )); continue
     fi
 
+    # Also skip any backend app dir (has __init__.py) that isn't config/
+    # These are project-specific Django apps, never template files
+    if [[ "$_tf" == backend/*/  ]] || [[ "$_tf" =~ ^backend/([^/]+)/ ]]; then
+      local _app_dir="${BASH_REMATCH[1]}"
+      if [[ "$_app_dir" != "config" && "$_app_dir" != "backup" && "$_app_dir" != "requirements" ]] \
+         && [[ -f "$ROOT_DIR/backend/${_app_dir}/__init__.py" ]]; then
+        echo -e "   ${Y}⊘  app:        ${_tf}${Z}"
+        (( _total_skipped++ )); continue
+      fi
+    fi
+
     local _src="$ROOT_DIR/$_tf"
     local _dst="$_clone_dir/$_tf"
 
