@@ -2915,6 +2915,53 @@ print('\n'.join(files))
     fi
   }
 
+  # Smart-merge requirements/*.txt:
+  #   - Everything ABOVE "# Project-specific integrations" comes from the template
+  #   - Everything FROM that marker downward is kept from the local file untouched
+  #   - If the local file has no marker, the whole file is overwritten (first run)
+  _sync_merge_requirements() {
+    local _lpath="$1" _remote="$2"
+    local _marker="# Project-specific integrations"
+    # If local file doesn't exist or has no marker → use remote as-is
+    if [[ ! -f "$_lpath" ]] || ! grep -qF "$_marker" "$_lpath" 2>/dev/null; then
+      printf '%s' "$_remote"; return
+    fi
+    python3 - "$_lpath" "$_marker" <<PYEOF
+import sys
+lpath   = sys.argv[1]
+marker  = sys.argv[2]
+remote  = sys.stdin.read()
+
+local_lines = open(lpath, encoding='utf-8', errors='replace').read().splitlines(keepends=True)
+
+# Find where the project-specific section starts in the local file
+project_start = None
+for i, line in enumerate(local_lines):
+    if line.rstrip('\r\n') == marker or line.rstrip('\r\n').startswith(marker):
+        project_start = i
+        break
+
+# Find where the template section ends in the remote content
+remote_lines = remote.splitlines(keepends=True)
+remote_top_end = None
+for i, line in enumerate(remote_lines):
+    if line.rstrip('\r\n') == marker or line.rstrip('\r\n').startswith(marker):
+        remote_top_end = i
+        break
+
+if project_start is None or remote_top_end is None:
+    # No marker in one of them — just use remote
+    sys.stdout.write(remote)
+else:
+    # Template top + local project-specific section
+    top = ''.join(remote_lines[:remote_top_end])
+    bottom = ''.join(local_lines[project_start:])
+    # Ensure single blank line between sections
+    result = top.rstrip('\n') + '\n\n' + bottom.lstrip('\n')
+    sys.stdout.write(result)
+PYEOF
+  }
+
   # Smart-merge package.json: keep local deps/name/version, sync everything else
   _sync_merge_pkg() {
     local _lpath="$1" _remote="$2"
@@ -3013,10 +3060,12 @@ PYEOF
     _b64=$(echo "$_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('content','').replace('\n',''))" 2>/dev/null)
     local _remote; _remote=$(_sync_b64_decode "$_b64")
 
-    # package.json → smart merge; everything else → overwrite
+    # package.json → smart merge; requirements/*.txt → smart merge; everything else → overwrite
     local _effective="$_remote"
     if [[ "$_rf" == *"/package.json" || "$_rf" == "package.json" ]] && [[ -f "$_lpath" ]]; then
       _effective=$(_sync_merge_pkg "$_lpath" "$_remote")
+    elif [[ "$_rf" == backend/requirements/*.txt ]]; then
+      _effective=$(_sync_merge_requirements "$_lpath" "$_remote")
     fi
 
     # Compare with local
