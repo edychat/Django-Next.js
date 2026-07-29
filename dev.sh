@@ -2808,24 +2808,16 @@ _SYNC_TEMPLATE_REPO="Ezodis/Django-Next.js"
 # Use trailing / for directories, exact path for single files.
 # These are skipped even if the template repo contains them.
 #
-# Rule of thumb:
-#   - backend/<app>/     → any Django app dir with an __init__.py
-#   - backend/project.py → project-specific settings/compose overrides
-#   - backend/media/     → user-uploaded files, never in the template
-#   - frontend/web/app/  → Next.js pages, layouts, components (project code)
-#   - frontend/web/public/ → project assets (images, fonts, etc.)
-#   Note: frontend/mobile/<appname>/ is handled dynamically via project.py
+# Keep this list GENERIC — project-specific app dirs (backend/myapp/, etc.)
+# are auto-discovered from backend/project.py → SYNC_PROJECT_PATHS below.
+# Only add paths here that every project should always protect.
 _SYNC_PROJECT_PATHS=(
-  # backend — app code and project-specific config
-  "backend/project.py"          # settings + COMPOSE_SERVICES for this project
-  "backend/books/"              # project app
-  "backend/cart/"               # project app
-  "backend/orders/"             # project app
-  "backend/payments/"           # project app
+  # backend — project-specific config (apps are auto-discovered via project.py below)
+  "backend/project.py"          # project settings + COMPOSE_SERVICES
   "backend/media/"              # uploaded files (never in template)
   # frontend/web — project pages and assets
-  "frontend/web/app/"           # Next.js pages, layouts, components (project code)
-  "frontend/web/public/"        # project assets (images, icons, bookcovers, etc.)
+  "frontend/web/app/"           # Next.js pages, layouts, components
+  "frontend/web/public/"        # project assets (images, icons, etc.)
 )
 
 # Merge extra protected paths from backend/project.py (SYNC_PROJECT_PATHS list).
