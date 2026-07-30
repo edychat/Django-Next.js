@@ -2,6 +2,8 @@
 # Works for any project — no workspace detection needed.
 # Always installs from frontend/web/package.json directly.
 # Source files are volume-mounted at runtime, not copied here.
+#
+# This file is a shared template — keep it free of project-specific logic.
 
 FROM node:20-alpine
 
