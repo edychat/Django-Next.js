@@ -3900,7 +3900,7 @@ gen_mobile_yaml() {
     done
     echo "      - \"${ROOT_DIR}/frontend/mobile/shared:/app/shared:z\""
     # Mount shared assets inside /app/shared/assets so Metro can find them
-    echo "      - \"${ROOT_DIR}/frontend/shared/assets:/app/shared/assets:z\""
+    echo "      - \"${ROOT_DIR}/frontend/web/public:/app/shared/assets:z\""
     # Mount metro.config.base.js so host changes are live without image rebuild
     echo "      - \"${ROOT_DIR}/frontend/mobile/metro.config.base.js:/app/metro.config.base.js:z\""
     # Persist Metro cache for faster rebuilds
@@ -7083,14 +7083,14 @@ smart_launch() {
 # will automatically restore everything from:
 #   - app.json (expo config)
 #   - package.json (dependencies)
-#   - frontend/shared/assets (icons/splash)
+#   - frontend/web/public (icons/splash)
 #   - .env (Google Maps API key)
 #
 # Handles:
 #   1. npm install (if node_modules missing)
 #   2. expo prebuild (if android/ missing) — with .env vars exported
 #   3. Inject Google Maps API key into AndroidManifest.xml
-#   4. Copy icon + splash assets from frontend/shared/assets
+#   4. Copy icon + splash assets from frontend/web/public
 #   5. Patch foojay-resolver → 1.0.0
 #   6. Write local.properties with ANDROID_HOME
 #   7. Make gradlew executable
@@ -7098,7 +7098,7 @@ _ensure_android_dir() {
   local build_folder="$1"
   local android_dir="$2"
   local app_dir="$MOBILE_DIR/$build_folder"
-  local shared_assets="$ROOT_DIR/frontend/shared/assets"
+  local shared_assets="$ROOT_DIR/frontend/web/public"
 
   # ── 1. Install node_modules if missing or incomplete ────────────────────
   if [[ ! -d "$app_dir/node_modules" ]] || [[ ! -d "$app_dir/node_modules/expo" ]]; then
@@ -7169,9 +7169,9 @@ _ensure_android_dir() {
     fi
   fi
 
-  # ── 4. Copy assets from frontend/shared/assets ──────────────────────────
+  # ── 4. Copy assets from frontend/web/public ──────────────────────────
   # expo prebuild reads icon/splash from app.json paths relative to the app dir.
-  # Those paths point to ../shared/assets (i.e. frontend/shared/assets).
+  # Those paths point to ../shared/assets (i.e. frontend/web/public).
   # If that folder is missing or the images aren't there, prebuild silently
   # skips them.  We copy them explicitly so the android res folder is always
   # populated correctly.
@@ -7185,7 +7185,7 @@ _ensure_android_dir() {
     icon_src=$(find "$shared_assets" -maxdepth 1 -name "${slug}*.png" | sort | head -1)
 
     if [[ -z "$icon_src" ]]; then
-      echo "⚠️  No PNG matching '${slug}*.png' in frontend/shared/assets — skipping asset copy"
+      echo "⚠️  No PNG matching '${slug}*.png' in frontend/web/public — skipping asset copy"
     else
       # Copy splash screen into every drawable density bucket
       for density in hdpi mdpi xhdpi xxhdpi xxxhdpi; do
@@ -7205,10 +7205,10 @@ _ensure_android_dir() {
           fi
         fi
       done
-      echo "✅ Assets synced from frontend/shared/assets ($(basename "$icon_src"))"
+      echo "✅ Assets synced from frontend/web/public ($(basename "$icon_src"))"
     fi
   else
-    echo "⚠️  frontend/shared/assets not found — skipping asset copy"
+    echo "⚠️  frontend/web/public not found — skipping asset copy"
   fi
 
   # ── 5. Patch foojay-resolver → 1.0.0 ────────────────────────────────────

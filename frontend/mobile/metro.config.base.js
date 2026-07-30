@@ -68,7 +68,16 @@ function isDocker() {
  * @returns {import('metro-config').MetroConfig}
  */
 function createMetroConfig(appDir, overrides = {}) {
+  // Resolve metro config modules from the app's own node_modules first,
+  // then fall back to the workspace root. This is critical when metro.config.base.js
+  // is volume-mounted at /app/ but the actual metro packages live inside
+  // /app/<AppName>/node_modules/ (installed per-app, not at workspace level).
   const { getDefaultConfig } = (() => {
+    const resolve = (id) => require(require.resolve(id, { paths: [appDir] }));
+    try { return resolve('expo/metro-config'); } catch (_) {}
+    try { return resolve('@expo/metro-config'); } catch (_) {}
+    try { return resolve('metro-config'); } catch (_) {}
+    // Last resort: workspace-level require (may fail in container)
     try { return require('expo/metro-config'); } catch (_) {}
     try { return require('@expo/metro-config'); } catch (_) {}
     return require('metro-config');
@@ -118,7 +127,7 @@ function createMetroConfig(appDir, overrides = {}) {
 
   // ── Cache ────────────────────────────────────────────────────────────────
   try {
-    const { FileStore } = require('metro-cache');
+    const { FileStore } = require(require.resolve('metro-cache', { paths: [appDir] }));
     config.cacheStores = [
       new FileStore({ root: path.join(appDir, '.metro-cache') }),
     ];

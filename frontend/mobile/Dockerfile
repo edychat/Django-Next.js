@@ -21,7 +21,7 @@ RUN npm config set fetch-retries 5 \
 
 # Copy package manifests and shared assets for layer caching.
 COPY frontend/mobile/ ./
-COPY frontend/shared/ ./shared/
+COPY frontend/web/public/ ./shared/
 
 RUN mkdir -p ./shared
 
