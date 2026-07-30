@@ -1,7 +1,13 @@
-# Always keep shell scripts with LF — CRLF breaks bash on Linux/WSL2
-*.sh         text eol=lf
-*.ps1        text eol=crlf
+# Line ending rules — specific patterns override the auto catch-all below.
+# Rules are matched top-to-bottom; first match wins.
+
+# Windows-only files — must stay CRLF
 *.bat        text eol=crlf
+*.ps1        text eol=crlf
+*.cmd        text eol=crlf
+
+# All other text files — force LF (safe for Linux/macOS/WSL2/Docker)
+*.sh         text eol=lf
 *.py         text eol=lf
 *.txt        text eol=lf
 *.yml        text eol=lf
@@ -14,4 +20,25 @@
 *.js         text eol=lf
 *.jsx        text eol=lf
 *.css        text eol=lf
+*.html       text eol=lf
+*.env        text eol=lf
+
+# Binary files — no line ending conversion
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.webp       binary
+*.ico        binary
+*.woff       binary
+*.woff2      binary
+*.ttf        binary
+*.otf        binary
+*.eot        binary
+*.pdf        binary
+*.zip        binary
+*.gz         binary
+*.tar        binary
+
+# Everything else — auto-detect
 *            text=auto
