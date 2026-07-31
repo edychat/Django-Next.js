@@ -7092,10 +7092,21 @@ smart_launch() {
       echo "  ✅ Service $svc rebuilt"
     done
 
-    # Start missing mobile services without rebuilding
-    if [[ ${#mobile_missing[@]} -gt 0 ]]; then
-      run_mobile
-    fi
+    # Start missing mobile services — build first since the image may not exist
+    for svc in "${mobile_missing[@]}"; do
+      echo "🔧 Building and starting missing service: $svc"
+      local yml_file="/tmp/${PROJECT_NAME}-mobile-compose.yml"
+      gen_mobile_yaml > "$yml_file"
+
+      echo "  📦 Building mobile service (no cache)..."
+      $DC_CMD -p "$PROJECT_NAME" "${COMPOSE_F[@]}" -f "$yml_file" build --no-cache "$svc" 2>/dev/null || true
+
+      echo "  🚀 Starting service..."
+      "$DC_CMD" -p "$PROJECT_NAME" "${COMPOSE_F[@]}" -f "$yml_file" up -d "$svc" \
+        >> "/tmp/${PROJECT_NAME}-mobile.log" 2>&1 || true
+
+      echo "  ✅ Service $svc started"
+    done
   fi
 
   # Wait a moment for services to start
