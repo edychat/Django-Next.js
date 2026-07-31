@@ -837,97 +837,8 @@ run_setup() {
       fi
 
       # ── Android SDK + Emulator ──────────────────────────────────────────────
-      # Install command-line tools, platform-tools, emulator, and create a
-      # default AVD so `./dev.sh` can launch the emulator on first run.
-      # Requires Java 21 — ensure it's on PATH for sdkmanager/avdmanager.
-      local _sdk_dir="$HOME/Library/Android/sdk"
-      local _cmdline_dir="$_sdk_dir/cmdline-tools/latest"
-      local _arch; _arch="$(uname -m)"
-      local _sysimg
-      if [[ "$_arch" == "arm64" || "$_arch" == "aarch64" ]]; then
-        _sysimg="system-images;android-34;google_apis;arm64-v8a"
-      else
-        _sysimg="system-images;android-34;google_apis;x86_64"
-      fi
-
-      # Ensure Java 21 is installed (needed by sdkmanager/avdmanager below)
-      if ! brew list --formula openjdk@21 &>/dev/null 2>&1; then
-        echo "📦 Installing Java 21 LTS (required for Android SDK tools)..."
-        yes | brew install openjdk@21 || true
-        eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
-      fi
-      # Put Java 21 on PATH for the rest of this setup block
-      local _j21="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
-      [[ -x "$_j21/bin/java" ]] && export JAVA_HOME="$_j21" && export PATH="$_j21/bin:$PATH"
-
-      if [[ ! -x "$_cmdline_dir/bin/sdkmanager" ]]; then
-        echo "📦 Installing Android SDK command-line tools..."
-        mkdir -p "$_cmdline_dir"
-        local _cmdline_url="https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip"
-        local _tmp_zip; _tmp_zip="$(mktemp /tmp/android-cmdline-XXXXXX.zip)"
-        curl -L --progress-bar "$_cmdline_url" -o "$_tmp_zip"
-        local _tmp_dir; _tmp_dir="$(mktemp -d /tmp/android-cmdline-XXXXXX)"
-        unzip -q "$_tmp_zip" -d "$_tmp_dir"
-        # The zip extracts to cmdline-tools/ — move its contents into latest/
-        if [[ -d "$_tmp_dir/cmdline-tools" ]]; then
-          cp -r "$_tmp_dir/cmdline-tools/." "$_cmdline_dir/"
-        fi
-        rm -rf "$_tmp_zip" "$_tmp_dir"
-        echo "✅ Android command-line tools installed"
-      else
-        echo "✅ Android SDK command-line tools already installed"
-      fi
-
-      # Put sdkmanager/avdmanager on PATH for the rest of this session
-      export ANDROID_HOME="$_sdk_dir"
-      export PATH="$_cmdline_dir/bin:$_sdk_dir/platform-tools:$_sdk_dir/emulator:$PATH"
-
-      # Accept licenses non-interactively
-      yes | sdkmanager --sdk_root="$_sdk_dir" --licenses >/dev/null 2>&1 || true
-
-      # Install required SDK packages if not already present
-      local _need_sdk=false
-      [[ ! -x "$_sdk_dir/platform-tools/adb" ]]    && _need_sdk=true
-      [[ ! -x "$_sdk_dir/emulator/emulator" ]]      && _need_sdk=true
-      [[ ! -d "$_sdk_dir/platforms/android-34" ]]   && _need_sdk=true
-      if $_need_sdk; then
-        echo "📦 Installing Android SDK packages (platform-tools, emulator, android-34)..."
-        sdkmanager --sdk_root="$_sdk_dir" \
-          "platform-tools" \
-          "emulator" \
-          "platforms;android-34" \
-          "build-tools;34.0.0" \
-          "$_sysimg" 2>&1 | grep -v "^Info:\|^Done\|^\[=" || true
-        echo "✅ Android SDK packages installed"
-      else
-        echo "✅ Android SDK packages already installed"
-        # Still install system image if missing (needed for AVD)
-        if [[ ! -d "$_sdk_dir/system-images/android-34" ]]; then
-          echo "📦 Installing Android system image..."
-          sdkmanager --sdk_root="$_sdk_dir" "$_sysimg" 2>&1 | grep -v "^Info:\|^Done\|^\[=" || true
-        fi
-      fi
-
-      # Create default AVD if none exists
-      export PATH="$_sdk_dir/cmdline-tools/latest/bin:$PATH"
-      local _avd_list
-      _avd_list=$(emulator -list-avds 2>/dev/null || true)
-      if [[ -z "$_avd_list" ]]; then
-        echo "📱 Creating Android Virtual Device (dev_avd)..."
-        yes | sdkmanager --sdk_root="$_sdk_dir" --licenses >/dev/null 2>&1 || true
-        echo "no" | avdmanager create avd \
-          --name "dev_avd" \
-          --package "$_sysimg" \
-          --device "pixel_6" \
-          --force 2>/dev/null \
-        || echo "no" | avdmanager create avd \
-          --name "dev_avd" \
-          --package "$_sysimg" \
-          --force
-        echo "✅ AVD 'dev_avd' created"
-      else
-        echo "✅ Android AVD already exists: $(echo "$_avd_list" | head -1)"
-      fi
+      # Delegate to the shared helper so setup and `./dev.sh android` stay in sync.
+      _install_android_sdk
       ;;
 
 
@@ -5796,48 +5707,80 @@ _start_emulator_with_apps() {
   local adb_cmd="${ANDROID_HOME}/platform-tools/adb"
   local emu_cmd="${ANDROID_HOME}/emulator/emulator"
   if [[ ! -x "$adb_cmd" ]] || [[ ! -x "$emu_cmd" ]]; then
-    echo "⚠️  Android SDK tools not found. Run: ./dev.sh setup"
+    echo "🔧 Android SDK not found — installing now..."
+    _install_android_sdk
+    _setup_android_path
+    adb_cmd="${ANDROID_HOME}/platform-tools/adb"
+    emu_cmd="${ANDROID_HOME}/emulator/emulator"
+  fi
+  if [[ ! -x "$adb_cmd" ]] || [[ ! -x "$emu_cmd" ]]; then
+    echo "❌ Android SDK install failed — skipping emulator launch."
     return 0
   fi
 
   local device=""
 
   if _emulator_running; then
-    # Emulator already up — grab its serial
+    # Emulator already up — grab its serial and install/launch immediately
     device=$("$adb_cmd" devices 2>/dev/null | grep "emulator" | grep "device$" | awk '{print $1}' | head -1)
+    echo "✅ Emulator already running ($device)"
+    _setup_physical_devices 2>/dev/null || true
+    _install_apps_on_device "$device"
   else
-    # Boot the emulator, then grab its serial
+    # Boot the emulator — returns immediately, fully detached
     echo ""
     echo "📱 Starting Android emulator..."
-    device=$(_ensure_emulator)
-    [[ -n "$device" ]] || return 0
+    _ensure_emulator
+
+    # Spawn a background watcher that installs apps once the emulator is ready.
+    # No timeout — it will wait however long the first boot takes.
+    local _adb="$adb_cmd"
+    local _android_home="$ANDROID_HOME"
+    (
+      export ANDROID_HOME="$_android_home"
+      export PATH="$_android_home/platform-tools:$_android_home/emulator:$_android_home/cmdline-tools/latest/bin:$PATH"
+      echo "⏳ Waiting for emulator to boot (this can take a few minutes on first run)..."
+      local _dev=""
+      while true; do
+        _dev=$("$_adb" devices 2>/dev/null | grep "emulator" | grep "device$" | awk '{print $1}' | head -1)
+        if [[ -n "$_dev" ]]; then
+          local _booted
+          _booted=$("$_adb" -s "$_dev" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+          [[ "$_booted" == "1" ]] && break
+        fi
+        sleep 5
+      done
+      echo "✅ Emulator ready ($_dev) — setting up adb reverse and installing apps..."
+      "$_adb" reverse tcp:8000 tcp:8000 2>/dev/null || true
+      "$_adb" reverse tcp:8081 tcp:8081 2>/dev/null || true
+      "$_adb" reverse tcp:8082 tcp:8082 2>/dev/null || true
+      _install_apps_on_device "$_dev"
+    ) >> /tmp/emulator-install.log 2>&1 &
+    disown $! 2>/dev/null || true
+    echo "   Background watcher started — apps will install automatically once booted."
+    echo "   Tail the log: tail -f /tmp/emulator-install.log"
   fi
+}
 
-  # Always set up adb reverse so Metro + API are reachable
-  _setup_physical_devices 2>/dev/null || true
+# ── Install all available APKs on a given device ────────────────────────────
+_install_apps_on_device() {
+  local device="$1"
+  [[ -z "$device" ]] && return 0
+  _setup_android_path
+  local adb_cmd="${ANDROID_HOME}/platform-tools/adb"
 
-  # Track which apps were installed from builds/ APKs
   local installed_app_slugs=()
-  
+
   # ── PRIORITY 1: Install APKs from frontend/mobile/builds/ ─────────────────
   discover_apps
   local builds_apks=()
   for folder in "${MOBILE_APPS[@]}"; do
     local app_key; app_key=$(echo "$folder" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-    # Check for development APK first (hyphenated), then EAS-style "(development)", then production APK
     local apk="$ROOT_DIR/frontend/mobile/builds/${app_key}-development.apk"
-    if [[ ! -f "$apk" ]]; then
-      apk="$ROOT_DIR/frontend/mobile/builds/${folder} (development).apk"
-    fi
-    if [[ ! -f "$apk" ]]; then
-      apk="$ROOT_DIR/frontend/mobile/builds/${app_key}.apk"
-    fi
-    if [[ ! -f "$apk" ]]; then
-      apk="$ROOT_DIR/frontend/mobile/builds/${folder}.apk"
-    fi
-    if [[ -f "$apk" ]]; then
-      builds_apks+=("$app_key:$apk")
-    fi
+    if [[ ! -f "$apk" ]]; then apk="$ROOT_DIR/frontend/mobile/builds/${folder} (development).apk"; fi
+    if [[ ! -f "$apk" ]]; then apk="$ROOT_DIR/frontend/mobile/builds/${app_key}.apk"; fi
+    if [[ ! -f "$apk" ]]; then apk="$ROOT_DIR/frontend/mobile/builds/${folder}.apk"; fi
+    if [[ -f "$apk" ]]; then builds_apks+=("$app_key:$apk"); fi
   done
 
   if [[ ${#builds_apks[@]} -gt 0 ]]; then
@@ -5845,39 +5788,26 @@ _start_emulator_with_apps() {
     echo "📦 Installing ${#builds_apks[@]} APK(s) from builds/ directory..."
     for entry in "${builds_apks[@]}"; do
       local app_key="${entry%%:*}"
-      local apk_path="${entry#*:}"
-      echo "   📲 Installing $(basename "$apk_path")..."
+      echo "   📲 Installing $app_key..."
       _install_app_on_emulator "$app_key" "$device"
       installed_app_slugs+=("$app_key")
     done
     echo "✅ Finished installing APKs from builds/"
   fi
-  
+
   # ── PRIORITY 2: Install locally built APKs (not in builds/) ───────────────
   local local_apks=()
   for folder in "${MOBILE_APPS[@]}"; do
     local app_key; app_key=$(echo "$folder" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-    
-    # Skip if already installed from builds/
     local skip_app=false
     for installed_slug in "${installed_app_slugs[@]}"; do
-      if [[ "$installed_slug" == "$app_key" ]]; then
-        skip_app=true
-        break
-      fi
+      [[ "$installed_slug" == "$app_key" ]] && skip_app=true && break
     done
-    
-    if [[ "$skip_app" == true ]]; then
-      continue
-    fi
-    
-    # Check for locally built APK
+    [[ "$skip_app" == true ]] && continue
     local local_apk="$MOBILE_DIR/$folder/android/app/build/outputs/apk/debug/app-debug.apk"
-    if [[ -f "$local_apk" ]]; then
-      local_apks+=("$app_key:$local_apk")
-    fi
+    [[ -f "$local_apk" ]] && local_apks+=("$app_key:$local_apk")
   done
-  
+
   if [[ ${#local_apks[@]} -gt 0 ]]; then
     echo ""
     echo "📦 Installing ${#local_apks[@]} locally built APK(s)..."
@@ -5885,12 +5815,11 @@ _start_emulator_with_apps() {
       local app_key="${entry%%:*}"
       local apk_path="${entry#*:}"
       echo "   📲 Installing $app_key (local build)..."
-      adb -s "$device" install -r "$apk_path" 2>/dev/null || echo "      ⚠️  Install failed (app may already be installed)"
+      "$adb_cmd" -s "$device" install -r "$apk_path" 2>/dev/null || echo "      ⚠️  Install failed"
     done
     echo "✅ Finished installing local APKs"
   fi
-  
-  # Show warning if no APKs found at all
+
   if [[ ${#builds_apks[@]} -eq 0 && ${#local_apks[@]} -eq 0 ]]; then
     echo ""
     echo "⚠️  No APKs found in builds/ or local builds"
@@ -6284,7 +6213,8 @@ _patch_android_gradle() {
 _setup_android_path() {
   local sdk="${ANDROID_HOME:-$(_default_android_sdk)}"
   export ANDROID_HOME="$sdk"
-  export PATH="$sdk/platform-tools:$sdk/emulator:$sdk/cmdline-tools/latest/bin:$sdk/cmdline-tools/bin:$PATH"
+  # Ensure standard system bins (timeout, ls, etc.) are always on PATH
+  export PATH="$sdk/platform-tools:$sdk/emulator:$sdk/cmdline-tools/latest/bin:$sdk/cmdline-tools/bin:/usr/bin:/bin:$PATH"
 
   # JAVA_HOME for Android/Gradle builds on macOS.
   # Gradle 9 + foojay-resolver has a bug with JVM 25 (IBM_SEMERU field removed).
@@ -6313,6 +6243,144 @@ _setup_android_path() {
   fi
 }
 
+# ── _install_android_sdk ───────────────────────────────────────────────────────
+# Installs Android SDK command-line tools, platform-tools, emulator, a system
+# image, and creates a default AVD — fully unattended.  Works on macOS, Linux
+# and WSL.  Called by both `run_setup` and the `android` command so the SDK is
+# always bootstrapped on demand without requiring a separate `./dev.sh setup`.
+_install_android_sdk() {
+  # Ensure standard tools (curl, unzip, timeout, etc.) are on PATH
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+  local _sdk_dir; _sdk_dir="$(_default_android_sdk)"
+  local _cmdline_dir="$_sdk_dir/cmdline-tools/latest"
+  local _arch; _arch="$(uname -m)"
+  local _sysimg
+  if [[ "$_arch" == "arm64" || "$_arch" == "aarch64" ]]; then
+    _sysimg="system-images;android-34;google_apis;arm64-v8a"
+  else
+    _sysimg="system-images;android-34;google_apis;x86_64"
+  fi
+
+  # ── 1. Java 21 ──────────────────────────────────────────────────────────────
+  if [[ "$OS" == "mac" ]]; then
+    if ! brew list --formula openjdk@21 &>/dev/null 2>&1; then
+      echo "📦 Installing Java 21 LTS (required for Android SDK tools)..."
+      yes | brew install openjdk@21 || true
+      eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+    fi
+    local _j21="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+    [[ -x "$_j21/bin/java" ]] && export JAVA_HOME="$_j21" && export PATH="$_j21/bin:$PATH"
+  else
+    # Linux / WSL — use apt (Ubuntu/Debian) or available package manager
+    if ! command -v java &>/dev/null; then
+      echo "📦 Installing Java 21 LTS (required for Android SDK tools)..."
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq
+        # Try temurin-21 first (Adoptium), fall back to openjdk-21
+        if apt-cache show temurin-21-jdk &>/dev/null 2>&1; then
+          sudo apt-get install -y -qq temurin-21-jdk || true
+        else
+          sudo apt-get install -y -qq openjdk-21-jdk-headless 2>/dev/null \
+            || sudo apt-get install -y -qq default-jdk-headless || true
+        fi
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y java-21-openjdk-headless || true
+      fi
+      hash -r 2>/dev/null || true
+    fi
+    local _java_bin; _java_bin="$(command -v java 2>/dev/null || true)"
+    if [[ -n "$_java_bin" ]]; then
+      local _jh; _jh="$(dirname "$(dirname "$(readlink -f "$_java_bin")")")"
+      export JAVA_HOME="$_jh"
+      export PATH="$_jh/bin:$PATH"
+      echo "✅ Java: $("$_java_bin" -version 2>&1 | head -1)"
+    else
+      echo "⚠️  Java not found — Android SDK install may fail. Install manually: sudo apt-get install openjdk-21-jdk-headless"
+    fi
+  fi
+
+  # ── 2. Android command-line tools ───────────────────────────────────────────
+  if [[ ! -x "$_cmdline_dir/bin/sdkmanager" ]]; then
+    echo "📦 Installing Android SDK command-line tools..."
+    mkdir -p "$_cmdline_dir"
+    local _cmdline_url
+    if [[ "$OS" == "mac" ]]; then
+      _cmdline_url="https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip"
+    else
+      _cmdline_url="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+    fi
+    local _tmp_zip; _tmp_zip="$(mktemp /tmp/android-cmdline-XXXXXX.zip)"
+    local _tmp_dir; _tmp_dir="$(mktemp -d /tmp/android-cmdline-XXXXXX)"
+    echo "   Downloading $(basename "$_cmdline_url")..."
+    curl -fL --progress-bar "$_cmdline_url" -o "$_tmp_zip"
+    if ! command -v unzip &>/dev/null; then
+      sudo apt-get install -y -qq unzip 2>/dev/null || true
+    fi
+    unzip -q "$_tmp_zip" -d "$_tmp_dir"
+    if [[ -d "$_tmp_dir/cmdline-tools" ]]; then
+      cp -r "$_tmp_dir/cmdline-tools/." "$_cmdline_dir/"
+    fi
+    rm -rf "$_tmp_zip" "$_tmp_dir"
+    echo "✅ Android command-line tools installed"
+  else
+    echo "✅ Android SDK command-line tools already installed"
+  fi
+
+  # ── 3. SDK packages ─────────────────────────────────────────────────────────
+  export ANDROID_HOME="$_sdk_dir"
+  export PATH="$_cmdline_dir/bin:$_sdk_dir/platform-tools:$_sdk_dir/emulator:$PATH"
+
+  yes | sdkmanager --sdk_root="$_sdk_dir" --licenses >/dev/null 2>&1 || true
+
+  local _need_sdk=false
+  [[ ! -x "$_sdk_dir/platform-tools/adb" ]] && _need_sdk=true
+  [[ ! -x "$_sdk_dir/emulator/emulator" ]]  && _need_sdk=true
+  [[ ! -d "$_sdk_dir/platforms/android-34" ]] && _need_sdk=true
+  if $_need_sdk; then
+    echo "📦 Installing Android SDK packages (platform-tools, emulator, android-34)..."
+    sdkmanager --sdk_root="$_sdk_dir" \
+      "platform-tools" \
+      "emulator" \
+      "platforms;android-34" \
+      "build-tools;34.0.0" \
+      "$_sysimg" 2>&1 | grep -v "^Info:\|^Done\|^\[=" || true
+    echo "✅ Android SDK packages installed"
+  else
+    echo "✅ Android SDK packages already installed"
+    if [[ ! -d "$_sdk_dir/system-images/android-34" ]]; then
+      echo "📦 Installing Android system image..."
+      sdkmanager --sdk_root="$_sdk_dir" "$_sysimg" 2>&1 | grep -v "^Info:\|^Done\|^\[=" || true
+    fi
+  fi
+
+  # ── 4. AVD ──────────────────────────────────────────────────────────────────
+  # Ensure the current user has KVM access (needed for hardware-accelerated emulation)
+  if [[ -e /dev/kvm ]]; then
+    chmod 666 /dev/kvm 2>/dev/null || sudo chmod 666 /dev/kvm 2>/dev/null || true
+    if ! groups 2>/dev/null | grep -q kvm; then
+      sudo usermod -aG kvm "$(whoami)" 2>/dev/null || true
+    fi
+  fi
+  local _avd_list
+  _avd_list=$("$_sdk_dir/emulator/emulator" -list-avds 2>/dev/null || true)
+  if [[ -z "$_avd_list" ]]; then
+    echo "📱 Creating Android Virtual Device (dev_avd)..."
+    yes | sdkmanager --sdk_root="$_sdk_dir" --licenses >/dev/null 2>&1 || true
+    echo "no" | avdmanager create avd \
+      --name "dev_avd" \
+      --package "$_sysimg" \
+      --device "pixel_6" \
+      --force 2>/dev/null \
+    || echo "no" | avdmanager create avd \
+      --name "dev_avd" \
+      --package "$_sysimg" \
+      --force
+    echo "✅ AVD 'dev_avd' created"
+  else
+    echo "✅ Android AVD already exists: $(echo "$_avd_list" | head -1)"
+  fi
+}
+
 # Boot the Android emulator if not already running; returns the device serial
 _ensure_emulator() {
   _setup_android_path
@@ -6321,14 +6389,16 @@ _ensure_emulator() {
   local avdmanager_cmd="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"
   local sdkmanager_cmd="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
 
-  # Already running? Retry a few times — adb server may need a moment after machine start
+  # Already running? Quick single check — use a subshell with alarm so adb
+  # never hangs if the server takes time to start.
   local dev
-  local retries=3
-  while [[ $retries -gt 0 ]]; do
-    dev=$("$adb_cmd" devices 2>/dev/null | grep "emulator" | grep "device$" | awk '{print $1}' | head -1)
-    [[ -n "$dev" ]] && break
-    sleep 2; retries=$((retries - 1))
-  done
+  dev=$(
+    ( "$adb_cmd" devices 2>/dev/null & ADB_PID=$!
+      sleep 5 & SLEEP_PID=$!
+      wait -n 2>/dev/null || wait $ADB_PID 2>/dev/null
+      kill $SLEEP_PID 2>/dev/null; kill $ADB_PID 2>/dev/null
+    ) | grep "emulator" | grep "device$" | awk '{print $1}' | head -1 || true
+  )
   if [[ -n "$dev" ]]; then
     echo "✅ Emulator already running ($dev)" >&2
     echo "$dev"
@@ -6337,7 +6407,7 @@ _ensure_emulator() {
 
   # Find or create AVD
   local avd
-  avd=$("$emu_cmd" -list-avds 2>/dev/null | head -1)
+  avd=$( "$emu_cmd" -list-avds 2>/dev/null | head -1 || true )
   if [[ -z "$avd" ]]; then
     echo "📱 No AVD found — creating dev_avd..." >&2
     local arch; arch="$(uname -m)"
@@ -6356,60 +6426,36 @@ _ensure_emulator() {
   fi
 
   echo "🚀 Booting AVD: $avd" >&2
-  # Double-fork via Python to fully escape the terminal's process group.
-  # bash's `disown` is ineffective when called inside a subshell (command
-  # Python double-fork so emulator spawns in a new session — completely detached
-  # from the terminal. Uses a temp script file to avoid heredoc issues under zsh.
-  local _emu_script; _emu_script=$(mktemp /tmp/_emu_launch_XXXXXX.py)
-  printf '%s\n' \
-    'import sys, os, signal' \
-    'emu_bin = sys.argv[1]' \
-    'avd     = sys.argv[2]' \
-    'pid = os.fork()' \
-    'if pid > 0:' \
-    '    os.waitpid(pid, 0)' \
-    '    sys.exit(0)' \
-    'os.setsid()' \
-    'pid2 = os.fork()' \
-    'if pid2 > 0:' \
-    '    sys.exit(0)' \
-    'signal.signal(signal.SIGHUP, signal.SIG_IGN)' \
-    'devnull = os.open(os.devnull, os.O_RDWR)' \
-    'os.dup2(devnull, 0)' \
-    'log_fd = os.open("/tmp/emulator.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)' \
-    'os.dup2(log_fd, 1)' \
-    'os.dup2(log_fd, 2)' \
-    'os.execv(emu_bin, [emu_bin, "-avd", avd, "-no-snapshot-load", "-gpu", "host"])' \
-    > "$_emu_script"
-  python3 "$_emu_script" "$emu_cmd" "$avd"
-  rm -f "$_emu_script"
 
-  # Wait for device with a 60s timeout (adb wait-for-device can hang forever)
-  local wait_pid
-  "$adb_cmd" wait-for-device &
-  wait_pid=$!
-  local t=0
-  while kill -0 "$wait_pid" 2>/dev/null && [[ $t -lt 60 ]]; do
-    sleep 2; t=$((t + 2))
-  done
-  kill "$wait_pid" 2>/dev/null || true
-
-  local waited=0
-  while [[ $waited -lt 300 ]]; do
-    local booted
-    booted=$("$adb_cmd" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-    [[ "$booted" == "1" ]] && break
-    sleep 3; waited=$((waited + 3))
-  done
-  sleep 2
-  dev=$("$adb_cmd" devices 2>/dev/null | grep "emulator" | grep "device$" | awk '{print $1}' | head -1)
-  if [[ -n "$dev" ]]; then
-    echo "✅ Emulator ready ($dev)" >&2
-    echo "$dev"
-  else
-    echo "⚠️  Emulator did not come up in time — skipping app install." >&2
-    echo ""
+  # Install libpulse0 if missing (required by the emulator binary on Linux/WSL)
+  if [[ "$OS" != "mac" ]] && ! ldconfig -p 2>/dev/null | grep -q 'libpulse.so.0'; then
+    echo "📦 Installing libpulse0 (required by Android emulator)..." >&2
+    sudo apt-get install -y -qq libpulse0 2>/dev/null || true
   fi
+
+  local _emu_lib="${ANDROID_HOME}/emulator/lib64"
+
+  echo "✅ Launching emulator in background (logs: /tmp/emulator.log)" >&2
+
+  if [[ "$OS" == "mac" ]]; then
+    # macOS: use nohup + disown
+    nohup "$emu_cmd" -avd "$avd" -no-snapshot-load -gpu host \
+      > /tmp/emulator.log 2>&1 &
+    disown $! 2>/dev/null || true
+  else
+    # Linux/WSL: setsid + redirect stdin to /dev/null so the emulator is fully
+    # detached from the terminal. Without closing stdin the process stays attached
+    # to the pts and dies when the parent shell exits.
+    export LD_LIBRARY_PATH="${_emu_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    setsid "$emu_cmd" -avd "$avd" \
+      -no-window -no-audio -no-boot-anim -no-snapshot-load \
+      -gpu swiftshader_indirect -no-metrics \
+      < /dev/null > /tmp/emulator.log 2>&1 &
+    disown $! 2>/dev/null || true
+  fi
+
+  echo "   App install will happen automatically once it's ready." >&2
+  # Return immediately
 }
 
 # Install + launch one app on the emulator
@@ -8702,16 +8748,23 @@ case "$CMD" in
     # ./dev.sh android — Start Android emulator, reverse ports, install and open apps
     echo "📱 Starting Android development environment..."
     echo ""
-    
-    # Setup Android SDK path
+
+    # Auto-install SDK if missing — no need to run ./dev.sh setup separately
     _setup_android_path
     _adb_bin="${ANDROID_HOME}/platform-tools/adb"
     _emu_bin="${ANDROID_HOME}/emulator/emulator"
-    
-    # Check if adb and emulator are available
+
     if [[ ! -x "$_adb_bin" ]] || [[ ! -x "$_emu_bin" ]]; then
-      echo "❌ Android SDK tools not found."
-      echo "   Run: ./dev.sh setup"
+      echo "🔧 Android SDK not found — installing now..."
+      echo ""
+      _install_android_sdk
+      _setup_android_path
+      _adb_bin="${ANDROID_HOME}/platform-tools/adb"
+      _emu_bin="${ANDROID_HOME}/emulator/emulator"
+    fi
+
+    if [[ ! -x "$_adb_bin" ]] || [[ ! -x "$_emu_bin" ]]; then
+      echo "❌ Android SDK install failed. Check the output above for errors."
       exit 1
     fi
     

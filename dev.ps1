@@ -381,4 +381,58 @@ $wslCmd = "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd '$wslRoot' && sed -i 's/
 _step "Running dev.sh inside Ubuntu..."
 Write-Host ""
 wsl.exe -d Ubuntu -- bash -c $wslCmd
-exit $LASTEXITCODE
+$devShExitCode = $LASTEXITCODE
+
+# ── Android: open emulator screen via scrcpy ─────────────────────────────────
+if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {
+    $scrcpyExe = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "scrcpy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
+    if (-not $scrcpyExe) {
+        $scrcpyExe = (Get-Command scrcpy -ErrorAction SilentlyContinue)?.Source
+    }
+
+    if (-not $scrcpyExe) {
+        Write-Host ""
+        Write-Host "  >> Installing scrcpy (Android screen mirror)..." -ForegroundColor Cyan
+        winget install --id Genymobile.scrcpy --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+        $scrcpyExe = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "scrcpy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
+    }
+
+    if ($scrcpyExe) {
+        Write-Host ""
+        Write-Host "  >> Connecting to Android emulator screen..." -ForegroundColor Cyan
+
+        # Put emulator in TCP mode so Windows can reach it via port forward
+        wsl.exe -d Ubuntu -- bash -c "/root/Android/Sdk/platform-tools/adb -s emulator-5554 tcpip 5555 2>/dev/null; sleep 1" 2>&1 | Out-Null
+
+        # Forward Windows localhost:5555 → WSL emulator:5555
+        $wslIp = (wsl.exe -d Ubuntu -- bash -c "hostname -I" 2>$null)?.Trim()?.Split(" ")[0]
+        if ($wslIp) {
+            # Try elevated first, fall back to non-elevated (works if already admin)
+            try {
+                netsh interface portproxy delete v4tov4 listenport=5555 listenaddress=127.0.0.1 2>&1 | Out-Null
+                netsh interface portproxy add v4tov4 listenport=5555 listenaddress=127.0.0.1 connectport=5555 connectaddress=$wslIp 2>&1 | Out-Null
+            } catch {
+                try {
+                    $ps = Start-Process powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList `
+                        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"netsh interface portproxy delete v4tov4 listenport=5555 listenaddress=127.0.0.1 2>null; netsh interface portproxy add v4tov4 listenport=5555 listenaddress=127.0.0.1 connectport=5555 connectaddress=$wslIp`""
+                    $ps.WaitForExit(8000) | Out-Null
+                } catch {}
+            }
+        }
+
+        Start-Sleep -Seconds 2
+
+        Write-Host "  OK Opening emulator screen..." -ForegroundColor Green
+        Start-Process -FilePath $scrcpyExe -ArgumentList @(
+            "--tcpip=127.0.0.1:5555",
+            "--window-title=Android Emulator",
+            "--max-size=1024",
+            "--stay-awake"
+        )
+    } else {
+        Write-Host "  !! scrcpy not found — install it to see the emulator screen:" -ForegroundColor Yellow
+        Write-Host "       winget install Genymobile.scrcpy" -ForegroundColor Yellow
+    }
+}
+
+exit $devShExitCode
