@@ -74,6 +74,74 @@ function Build-ArgStr {
     }) -join ' '
 }
 
+function Find-ScrcpyExecutable {
+    $wingetPackages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    if (Test-Path $wingetPackages) {
+        # Do not recursively scan every winget package; that can take minutes.
+        $scrcpyPackages = Get-ChildItem $wingetPackages -Directory -Filter 'Genymobile.scrcpy*' -ErrorAction SilentlyContinue
+        foreach ($package in $scrcpyPackages) {
+            $match = Get-ChildItem $package.FullName -Recurse -Filter 'scrcpy.exe' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($match) { return $match.FullName }
+        }
+    }
+
+    $localTools = Join-Path $env:LOCALAPPDATA 'EliteCar\tools\scrcpy'
+    if (Test-Path $localTools) {
+        $match = Get-ChildItem $localTools -Recurse -Filter 'scrcpy.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($match) { return $match.FullName }
+    }
+
+    $command = Get-Command scrcpy -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Install-Scrcpy {
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($winget) {
+        _step 'Installing scrcpy with winget...'
+        & $winget.Source install --id Genymobile.scrcpy --silent --accept-package-agreements --accept-source-agreements
+        $installed = Find-ScrcpyExecutable
+        if ($installed) { return $installed }
+        _warn 'winget did not make scrcpy available; trying the official release package.'
+    } else {
+        _warn 'winget is not installed; using the official scrcpy release package.'
+    }
+
+    $installRoot = Join-Path $env:LOCALAPPDATA 'EliteCar\tools\scrcpy'
+    $zipPath = Join-Path $env:TEMP ("elitecar-scrcpy-{0}.zip" -f $PID)
+
+    try {
+        _step 'Downloading scrcpy from the official Genymobile GitHub release...'
+        $headers = @{ 'User-Agent' = 'EliteCar-dev-script' }
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Genymobile/scrcpy/releases/latest' -Headers $headers
+        $assetPattern = if ($env:PROCESSOR_ARCHITECTURE -match '^(ARM64|AMD64)$') {
+            '^scrcpy-win64-v.*\.zip$'
+        } else {
+            '^scrcpy-win32-v.*\.zip$'
+        }
+        $asset = $release.assets | Where-Object { $_.name -match $assetPattern } | Select-Object -First 1
+        if (-not $asset) { throw 'No compatible Windows scrcpy package was found in the latest release.' }
+
+        if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+        Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $zipPath -UseBasicParsing
+        New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $installRoot -Force
+
+        $installed = Find-ScrcpyExecutable
+        if (-not $installed) { throw 'The downloaded package did not contain scrcpy.exe.' }
+        _ok "scrcpy installed: $installed"
+        return $installed
+    } catch {
+        _warn "Could not install scrcpy automatically: $($_.Exception.Message)"
+        return $null
+    } finally {
+        if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 # ── sync fast-path ─────────────────────────────────────────────────────────────
 # `.\dev.ps1 sync [flags]` skips the full tool bootstrap (podman, cloudflared,
 # etc.) and goes directly to WSL2 with only the minimal tools sync needs
@@ -82,7 +150,7 @@ function Build-ArgStr {
 # no Podman machine startup, just WSL2 → bash dev.sh sync.
 if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'sync') {
     Write-Host ""
-    Write-Host "  OldBook.ai  — sync" -ForegroundColor Blue
+    Write-Host "  EliteCar.app  — sync" -ForegroundColor Blue
     Write-Host "  ══════════════════" -ForegroundColor Blue
     Write-Host ""
 
@@ -105,31 +173,32 @@ if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'sync') {
 
     # 3. Ensure minimal tools (curl + python3) are present — idempotent, fast
     _step "Checking sync prerequisites inside Ubuntu..."
-    wsl.exe -d Ubuntu -- bash -c @'
+    @'
 command -v curl    &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq curl;    }
 command -v python3 &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3; }
 echo "  OK curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}')"
 echo "  OK python3 $(python3 --version 2>/dev/null)"
-'@
+'@ | wsl.exe -d Ubuntu -- bash -s
     if ($LASTEXITCODE -ne 0) {
         _warn "Prerequisite check had warnings (non-fatal, continuing...)"
     }
 
     # 4. Convert path and run dev.sh sync inside WSL2
     $wslRoot = Get-WslPath $ROOT_DIR
-    $argStr  = Build-ArgStr $DevArgs   # includes 'sync' plus any extra flags
+    $argStr  = Build-ArgStr $DevArgs   # display only
 
     Write-Host ""
     _step "Running dev.sh $argStr inside Ubuntu..."
     Write-Host ""
 
-    wsl.exe -d Ubuntu -- bash -c "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd '$wslRoot' && sed -i 's/\r//' dev.sh && bash dev.sh $argStr"
+    $wslArgs = @('-d', 'Ubuntu', '--cd', $wslRoot, '--', 'bash', 'dev.sh') + $DevArgs
+    & wsl.exe @wslArgs
     exit $LASTEXITCODE
 }
 
 # ── full bootstrap (all other commands) ───────────────────────────────────────
 Write-Host ""
-Write-Host "  OldBook.ai  Windows Bootstrap" -ForegroundColor Blue
+Write-Host "  EliteCar.app  Windows Bootstrap" -ForegroundColor Blue
 Write-Host "  ================================" -ForegroundColor Blue
 Write-Host ""
 
@@ -361,7 +430,7 @@ echo ""
 echo "  OK All tools ready inside Ubuntu"
 '@
 
-wsl.exe -d Ubuntu -- bash -c $bootstrapScript
+$bootstrapScript | wsl.exe -d Ubuntu -- bash -s
 if ($LASTEXITCODE -ne 0) {
     _warn "Tool bootstrap had errors (non-fatal — will retry next run)"
 }
@@ -376,25 +445,19 @@ Write-Host ""
 
 $argStr = Build-ArgStr $DevArgs
 
-$wslCmd = "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd '$wslRoot' && sed -i 's/\r//' dev.sh && bash dev.sh $argStr"
-
 _step "Running dev.sh inside Ubuntu..."
 Write-Host ""
-wsl.exe -d Ubuntu -- bash -c $wslCmd
+$wslArgs = @('-d', 'Ubuntu', '--cd', $wslRoot, '--', 'bash', 'dev.sh') + $DevArgs
+& wsl.exe @wslArgs
 $devShExitCode = $LASTEXITCODE
 
 # ── Android: open emulator screen via scrcpy ─────────────────────────────────
 if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {
-    $scrcpyExe = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "scrcpy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
-    if (-not $scrcpyExe) {
-        $scrcpyExe = (Get-Command scrcpy -ErrorAction SilentlyContinue)?.Source
-    }
+    $scrcpyExe = Find-ScrcpyExecutable
 
     if (-not $scrcpyExe) {
         Write-Host ""
-        Write-Host "  >> Installing scrcpy (Android screen mirror)..." -ForegroundColor Cyan
-        winget install --id Genymobile.scrcpy --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-        $scrcpyExe = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "scrcpy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)?.FullName
+        $scrcpyExe = Install-Scrcpy
     }
 
     if ($scrcpyExe) {
@@ -405,7 +468,12 @@ if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {
         wsl.exe -d Ubuntu -- bash -c "/root/Android/Sdk/platform-tools/adb -s emulator-5554 tcpip 5555 2>/dev/null; sleep 1" 2>&1 | Out-Null
 
         # Forward Windows localhost:5555 → WSL emulator:5555
-        $wslIp = (wsl.exe -d Ubuntu -- bash -c "hostname -I" 2>$null)?.Trim()?.Split(" ")[0]
+        $wslIpOutput = (wsl.exe -d Ubuntu -- bash -c "hostname -I" 2>$null) -join ''
+        $wslIp = $null
+        if ($wslIpOutput) {
+            $wslIpParts = $wslIpOutput.Trim() -split '\s+'
+            if ($wslIpParts.Count -gt 0) { $wslIp = $wslIpParts[0] }
+        }
         if ($wslIp) {
             # Try elevated first, fall back to non-elevated (works if already admin)
             try {
@@ -422,16 +490,48 @@ if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {
 
         Start-Sleep -Seconds 2
 
+        $adbBridgeReady = $false
+        try {
+            $adbBridgeReady = Test-NetConnection -ComputerName 127.0.0.1 -Port 5555 `
+                -InformationLevel Quiet -WarningAction SilentlyContinue
+        } catch {}
+
+        if (-not $adbBridgeReady) {
+            _fail 'The emulator is running, but Windows cannot reach its ADB port.'
+            _warn 'Re-run this command and accept the Administrator prompt used to create the WSL port bridge.'
+            exit 1
+        }
+
+        # scrcpy's default reverse socket is unreliable across the WSL port
+        # bridge. Connect with the adb bundled beside scrcpy, then force the
+        # video/control socket to use adb forward instead.
+        $scrcpyArgs = @()
+        $scrcpyAdb = Join-Path (Split-Path $scrcpyExe -Parent) 'adb.exe'
+        if (Test-Path $scrcpyAdb) {
+            & $scrcpyAdb disconnect 127.0.0.1:5555 2>$null | Out-Null
+            & $scrcpyAdb connect 127.0.0.1:5555 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                _fail 'Windows ADB could not connect to the WSL emulator.'
+                exit 1
+            }
+            $scrcpyArgs += '--serial=127.0.0.1:5555'
+        } else {
+            $scrcpyArgs += '--tcpip=127.0.0.1:5555'
+        }
+        $scrcpyArgs += @('--force-adb-forward', '--max-size=1024', '--stay-awake')
+
+        # Launch scrcpy — shows the emulator screen in a Windows window
         Write-Host "  OK Opening emulator screen..." -ForegroundColor Green
-        Start-Process -FilePath $scrcpyExe -ArgumentList @(
-            "--tcpip=127.0.0.1:5555",
-            "--window-title=Android Emulator",
-            "--max-size=1024",
-            "--stay-awake"
-        )
+        $scrcpyProcess = Start-Process -FilePath $scrcpyExe -PassThru -ArgumentList $scrcpyArgs
+        Start-Sleep -Seconds 2
+        if ($scrcpyProcess.HasExited -and $scrcpyProcess.ExitCode -ne 0) {
+            _fail "scrcpy exited before opening the emulator (exit code $($scrcpyProcess.ExitCode))."
+            exit $scrcpyProcess.ExitCode
+        }
     } else {
-        Write-Host "  !! scrcpy not found — install it to see the emulator screen:" -ForegroundColor Yellow
-        Write-Host "       winget install Genymobile.scrcpy" -ForegroundColor Yellow
+        Write-Host "  !! scrcpy could not be installed, so the emulator is running headlessly." -ForegroundColor Yellow
+        Write-Host "     Install scrcpy manually, then run: .\dev.ps1 android" -ForegroundColor Yellow
+        exit 1
     }
 }
 
