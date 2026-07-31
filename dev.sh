@@ -1302,8 +1302,12 @@ _run_detached() {
 # login (needed for podman-compose to connect after a reboot without running
 # `podman system service` manually).
 _ensure_lingering() {
-  # Only relevant on Linux / WSL with systemd
+  # Lingering only applies to rootless Podman under a running systemd/logind.
+  # The Windows bootstrap currently runs WSL as root; rootful containers are not
+  # tied to a user slice, and loginctl is commonly installed but offline there.
   [[ "$OS" == "linux" || "$OS" == "wsl" ]] || return 0
+  [[ "$(id -u)" -ne 0 ]] || return 0
+  [[ -d /run/systemd/system ]] || return 0
   command -v loginctl &>/dev/null || return 0  # no systemd-logind → skip
 
   local linger_ok=false
@@ -1321,6 +1325,63 @@ _ensure_lingering() {
   if command -v systemctl &>/dev/null; then
     systemctl --user enable --now podman.socket 2>/dev/null || true
   fi
+}
+
+# ── Manual health check runner (WSL2 / no-systemd fallback) ──────────────────
+# On WSL2 without systemd, Podman's health check timer unit never starts, so
+# containers stay stuck at "starting" forever even when they are actually healthy.
+# This function detects that situation and spawns a lightweight background loop
+# that calls `podman healthcheck run` for every project container every 5 seconds,
+# which is all that's needed to update the health status in Podman's state store.
+# It is completely safe to call on systemd systems — it just exits immediately.
+_start_healthcheck_runner() {
+  [[ "$OS" == "linux" || "$OS" == "wsl" ]] || return 0
+  # If systemd is PID 1, Podman's own timer handles it — nothing to do.
+  local _init; _init=$(cat /proc/1/comm 2>/dev/null || true)
+  if [[ "$_init" == "systemd" ]]; then return 0; fi
+
+  local _pid_file="/tmp/${PROJECT_NAME}-healthcheck-runner.pid"
+  local _log_file="/tmp/${PROJECT_NAME}-healthcheck-runner.log"
+
+  # Keep a live runner. A previous version wrote $$ from inside the background
+  # subshell; in Bash that is the parent dev.sh PID, so the next launch killed
+  # dev.sh itself here before it could open live_monitor.
+  if [[ -f "$_pid_file" ]]; then
+    local _epid; _epid=$(cat "$_pid_file" 2>/dev/null || true)
+    if [[ "$_epid" =~ ^[0-9]+$ ]] && kill -0 "$_epid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$_pid_file"
+  fi
+
+  # Spawn detached runner:
+  #  - Phase 1: 15 rapid rounds at 2s intervals to satisfy retries=10 fast
+  #  - Phase 2: steady 5s poll forever
+  (
+    _run_checks() {
+      while IFS= read -r _cname; do
+        [[ -z "$_cname" ]] && continue
+        # podman may read from stdin. Without /dev/null it consumes the process
+        # substitution feeding this loop, so only the first container is checked.
+        podman healthcheck run "$_cname" </dev/null >> "$_log_file" 2>&1 || true
+      done < <(podman ps \
+        --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+        --format '{{.Names}}' 2>/dev/null)
+    }
+    # Phase 1 — burst: 15 rounds × 2s = 30s to flip all containers healthy
+    for _i in $(seq 1 15); do
+      _run_checks
+      sleep 2
+    done
+    # Phase 2 — steady poll
+    while true; do
+      _run_checks
+      sleep 5
+    done
+  ) >> "$_log_file" 2>&1 &
+  local _runner_pid=$!
+  echo "$_runner_pid" > "$_pid_file"
+  disown "$_runner_pid" 2>/dev/null || true
 }
 
 # ── Update mobile API URL with current local IP ──────────────────────────────
@@ -3823,7 +3884,10 @@ gen_mobile_yaml() {
     echo "      backend:"
     echo "        condition: service_started"
     echo "    healthcheck:"
-    echo "      test: [\"CMD\", \"node\", \"-e\", \"require('http').get({host:'127.0.0.1',port:${port},path:'/status',timeout:15000},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>process.exit(d.includes('running')?0:1))}).on('error',()=>process.exit(1)).on('timeout',function(){this.destroy();process.exit(1)})\"]"
+    # Expo's current Metro server accepts connections before its HTTP /status
+    # handler is responsive (and that endpoint can hang indefinitely). A TCP
+    # listener check accurately reports whether Metro has finished binding.
+    echo "      test: [\"CMD\", \"node\", \"-e\", \"const s=require('net').connect({host:'127.0.0.1',port:${port}});s.setTimeout(5000);s.on('connect',()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(1));s.on('timeout',()=>{s.destroy();process.exit(1)})\"]"
     echo "      interval: 30s"
     echo "      timeout: 20s"
     echo "      retries: 10"
@@ -4982,6 +5046,10 @@ live_monitor() {
   # Clear stale rebuild status file so status display is accurate
   rm -f "/tmp/${PROJECT_NAME}-rebuild-status"
 
+  # `status` can be launched directly, without passing through smart_launch.
+  # Ensure WSL's no-systemd health fallback is active before drawing rows.
+  _start_healthcheck_runner
+
   # Check if Podman machine exists and is running, but DON'T create or start it
   # Status command should only show status, not change anything
   local _machine_running=false
@@ -5635,10 +5703,18 @@ ASEOF
       [[ "$already_open" != "yes" ]] && open -a Safari "$_open_url" 2>/dev/null || true
       ;;
     linux|wsl)
-      # xdg-open is the standard cross-desktop launcher on Linux/WSL
-      if command -v xdg-open &>/dev/null; then
-        xdg-open "$_open_url" 2>/dev/null || true
-      fi
+      # On WSL2: open in the Windows host browser via wslview or PowerShell.
+      # Never block — always fire-and-forget with a 3s timeout.
+      {
+        if command -v wslview &>/dev/null; then
+          wslview "$_open_url" 2>/dev/null &
+        elif command -v powershell.exe &>/dev/null; then
+          powershell.exe -NoProfile -NonInteractive -Command "Start-Process '$_open_url'" 2>/dev/null &
+        elif command -v xdg-open &>/dev/null; then
+          timeout 3 xdg-open "$_open_url" 2>/dev/null &
+        fi
+      } &>/dev/null &
+      disown $! 2>/dev/null || true
       ;;
     windows)
       # Git Bash / MSYS2 — start opens the default browser
@@ -6857,6 +6933,7 @@ smart_launch() {
   # (first run, rebuild, or all-running).  loginctl enable-linger persists across
   # reboots so it only does real work the very first time per user account.
   _ensure_lingering
+  _start_healthcheck_runner
 
   # On macOS: install a launchd agent so the Podman machine persists across
   # terminal sessions and reboots.  Without this the machine stops when the
@@ -6938,6 +7015,7 @@ smart_launch() {
     # Start Cloudflare Tunnel if not already running
     _start_cloudflare_tunnel
     _start_tunnel_watchdog
+    _start_healthcheck_runner
 
     # Sync mobile containers to current tunnel URLs (handles tunnel restarts
     # where the trycloudflare.com hostname changes between sessions).
@@ -6989,6 +7067,7 @@ smart_launch() {
     # Start Cloudflare Tunnel after services are running
     _start_cloudflare_tunnel
     _start_tunnel_watchdog
+    _start_healthcheck_runner
 
     echo ""
     echo "✅ Everything is up! Services are running in the background."
@@ -7123,6 +7202,7 @@ smart_launch() {
   # Start Cloudflare Tunnel after services are running
   _start_cloudflare_tunnel
   _start_tunnel_watchdog
+  _start_healthcheck_runner
 
   _open_safari || true
 
@@ -8006,6 +8086,7 @@ case "$CMD" in
     if has_mobile_apps; then run_mobile; fi
     _start_cloudflare_tunnel
     _start_tunnel_watchdog
+    _start_healthcheck_runner
     echo ""
     echo "✅ Services started in the background."
     _draw_status
@@ -8016,6 +8097,7 @@ case "$CMD" in
     dc_up_ordered
     _start_cloudflare_tunnel
     _start_tunnel_watchdog
+    _start_healthcheck_runner
     echo ""
     echo "✅ Core services started in the background."
     _draw_status
@@ -8424,6 +8506,7 @@ case "$CMD" in
       # Start Cloudflare Tunnel after services are running
       _start_cloudflare_tunnel
       _start_tunnel_watchdog
+      _start_healthcheck_runner
 
       echo ""
       echo "✅ Everything is up! Services are running in the background."
@@ -9414,6 +9497,7 @@ case "$CMD" in
     if has_mobile_apps; then run_mobile; fi
     _start_cloudflare_tunnel
     _start_tunnel_watchdog
+    _start_healthcheck_runner
     echo ""
     echo "✅ Services started in the background."
     _draw_status
