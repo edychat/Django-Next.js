@@ -184,16 +184,20 @@ echo "  OK python3 $(python3 --version 2>/dev/null)"
     }
 
     # 4. Convert path and run dev.sh sync inside WSL2
-    $wslRoot = Get-WslPath $ROOT_DIR
-    $argStr  = Build-ArgStr $DevArgs   # display only
-
+    $wslRoot2 = Get-WslPath $ROOT_DIR
+    $argStr2  = Build-ArgStr $DevArgs
     Write-Host ""
-    _step "Running dev.sh $argStr inside Ubuntu..."
+    _step "Running dev.sh $argStr2 inside Ubuntu..."
     Write-Host ""
-
-    $wslArgs = @('-d', 'Ubuntu', '--cd', $wslRoot, '--', 'bash', 'dev.sh') + $DevArgs
-    & wsl.exe @wslArgs
-    exit $LASTEXITCODE
+    $tmpScript2    = "/tmp/elitecar-sync-$PID.sh"
+    $tmpScript2Win = "\\wsl.localhost\Ubuntu\tmp\elitecar-sync-$PID.sh"
+    $syncContent = "#!/bin/bash`nexport PATH=`"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:`$HOME/.local/bin`"`ncd '$wslRoot2'`nsed -i 's/\r//' dev.sh`nexec bash dev.sh $argStr2`n"
+    [System.IO.File]::WriteAllText($tmpScript2Win, $syncContent, (New-Object System.Text.UTF8Encoding $false))
+    wsl.exe -d Ubuntu -- chmod +x $tmpScript2
+    wsl.exe -d Ubuntu -- bash $tmpScript2
+    $syncExit = $LASTEXITCODE
+    wsl.exe -d Ubuntu -- rm -f $tmpScript2 2>$null | Out-Null
+    exit $syncExit
 }
 
 # ── full bootstrap (all other commands) ───────────────────────────────────────
@@ -447,9 +451,18 @@ $argStr = Build-ArgStr $DevArgs
 
 _step "Running dev.sh inside Ubuntu..."
 Write-Host ""
-$wslArgs = @('-d', 'Ubuntu', '--cd', $wslRoot, '--', 'bash', 'dev.sh') + $DevArgs
-& wsl.exe @wslArgs
+
+# Write the command to a temp script to avoid PowerShell quoting issues.
+# Use [IO.File]::WriteAllText with explicit LF endings — piping through
+# PowerShell adds CRLF which bash misparsed, mangling the argument list.
+$tmpScript = "/tmp/elitecar-dev-run-$PID.sh"
+$tmpScriptWin = "\\wsl.localhost\Ubuntu\tmp\elitecar-dev-run-$PID.sh"
+$bashContent = "#!/bin/bash`nexport PATH=`"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:`$HOME/.local/bin`"`ncd '$wslRoot'`nsed -i 's/\r//' dev.sh`nexec bash dev.sh $argStr`n"
+[System.IO.File]::WriteAllText($tmpScriptWin, $bashContent, (New-Object System.Text.UTF8Encoding $false))
+wsl.exe -d Ubuntu -- chmod +x $tmpScript
+wsl.exe -d Ubuntu -- bash $tmpScript
 $devShExitCode = $LASTEXITCODE
+wsl.exe -d Ubuntu -- rm -f $tmpScript 2>$null | Out-Null
 
 # ── Android: open emulator screen via scrcpy ─────────────────────────────────
 if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {

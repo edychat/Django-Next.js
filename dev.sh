@@ -7193,7 +7193,7 @@ _ensure_android_dir() {
   # existed from a previous run without the key), we patch it in directly now.
   local _maps_key=""
   if [[ -f "$ROOT_DIR/.env" ]]; then
-    _maps_key=$(grep '^EXPO_PUBLIC_GOOGLE_MAPS_API_KEY=' "$ROOT_DIR/.env" | cut -d= -f2- | tr -d '"'"'" | head -1)
+    _maps_key=$(grep '^EXPO_PUBLIC_GOOGLE_MAPS_API_KEY=' "$ROOT_DIR/.env" | cut -d= -f2- | tr -d '"'"'" | head -1 || true)
   fi
   [[ -z "$_maps_key" ]] && _maps_key="${EXPO_PUBLIC_GOOGLE_MAPS_API_KEY:-}"
 
