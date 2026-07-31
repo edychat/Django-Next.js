@@ -1172,7 +1172,31 @@ _wire_podman_socket() {
       fi
       ;;
     linux|wsl)
-      local uid_sock="/run/user/$(id -u)/podman/podman.sock"
+      local uid_sock
+      if [[ "$(id -u)" -eq 0 ]]; then
+        uid_sock="/run/podman/podman.sock"
+      else
+        uid_sock="/run/user/$(id -u)/podman/podman.sock"
+      fi
+
+      # WSL without systemd has no socket-activated Podman API. Traefik needs
+      # this API to discover container labels; without it every route is a 404.
+      if [[ ! -S "$uid_sock" ]] && [[ ! -d /run/systemd/system ]]; then
+        local _socket_pid_file="/tmp/podman-api-$(id -u).pid"
+        local _socket_pid=""
+        [[ -f "$_socket_pid_file" ]] && _socket_pid=$(cat "$_socket_pid_file" 2>/dev/null || true)
+        if [[ ! "$_socket_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$_socket_pid" 2>/dev/null; then
+          mkdir -p "$(dirname "$uid_sock")"
+          _run_detached "/tmp/podman-api-$(id -u).log" "$_socket_pid_file" \
+            podman system service --time=0 "unix://${uid_sock}"
+        fi
+        local _socket_wait=0
+        while [[ ! -S "$uid_sock" && $_socket_wait -lt 30 ]]; do
+          sleep 0.1
+          _socket_wait=$((_socket_wait + 1))
+        done
+      fi
+
       if [[ -S "$uid_sock" ]]; then
         export DOCKER_HOST="unix://$uid_sock"
         export PODMAN_SOCK="$uid_sock"
@@ -1792,6 +1816,20 @@ _start_cloudflare_tunnel() {
     return 0
   fi
 
+  local _tunnel_token
+  _tunnel_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$ROOT_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || true)
+  local _retry_file="/tmp/${PROJECT_NAME}-tunnel-retry-after"
+  if [[ -z "$_tunnel_token" && -f "$_retry_file" ]]; then
+    local _retry_after _retry_now
+    _retry_after=$(cat "$_retry_file" 2>/dev/null || echo 0)
+    _retry_now=$(date +%s)
+    if [[ "$_retry_after" =~ ^[0-9]+$ ]] && [[ "$_retry_after" -gt "$_retry_now" ]]; then
+      echo "⏳ Cloudflare quick-tunnel cooldown active — retrying automatically in $(( _retry_after - _retry_now ))s"
+      return 0
+    fi
+    rm -f "$_retry_file"
+  fi
+
   local tunnel_log="/tmp/${PROJECT_NAME}-tunnel.log"
   local tunnel_pid_file="/tmp/${PROJECT_NAME}-tunnel.pid"
   local _local_host="${PROJECT_HOST}.localhost"
@@ -2000,9 +2038,6 @@ _start_cloudflare_tunnel() {
   # from any location — ideal for testing from remote machines.
   # To set up: create a tunnel at dash.cloudflare.com > Zero Trust > Networks > Tunnels
   # then copy the token into .env as: CLOUDFLARE_TUNNEL_TOKEN=<token>
-  local _tunnel_token
-  _tunnel_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$ROOT_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || true)
-
   rm -f "$tunnel_log"
   if [[ -n "$_tunnel_token" ]]; then
     # Named tunnel: URL is stable and configured in the Cloudflare dashboard.
@@ -2073,6 +2108,11 @@ _start_cloudflare_tunnel() {
       fi
     fi
     [[ -n "$tunnel_url" ]] && break
+    # Cloudflare has already rejected this quick-tunnel request. Do not wait
+    # the full 90 seconds or let repeated launcher runs amplify the rate limit.
+    if grep -q "429\|Too Many Requests\|error code: 1015" "$tunnel_log" 2>/dev/null; then
+      break
+    fi
     local _now; _now=$(( attempts / 10 ))
     if [[ $_now -gt $_last_dot ]]; then
       printf "."
@@ -2085,6 +2125,7 @@ _start_cloudflare_tunnel() {
   if [[ -z "$tunnel_url" ]]; then
     # Check if Cloudflare rate-limited us (429)
     if grep -q "429\|Too Many Requests\|error code: 1015" "$tunnel_log" 2>/dev/null; then
+      echo $(( $(date +%s) + 600 )) > "$_retry_file"
       echo "⚠️  Cloudflare rate-limited tunnel creation (429 Too Many Requests)"
       echo "   Too many tunnels were created in a short period."
       echo "   ⏳ Wait ~10 minutes, then run ./dev.sh again."
@@ -2098,6 +2139,7 @@ _start_cloudflare_tunnel() {
   fi
 
   echo "✅ Tunnel: $tunnel_url"
+  rm -f "$_retry_file"
   _save_tunnel_url "$tunnel_url"
   # Flush macOS DNS cache so the new trycloudflare.com subdomain resolves immediately.
   # sudo -n = non-interactive, never prompts — silently skips if no cached credentials.
@@ -2521,6 +2563,10 @@ _ensure_global_traefik() {
   command -v podman &>/dev/null || return 0
   podman ps >/dev/null 2>&1 || return 0
 
+  # Ensure the Docker-compatible API exists before deciding how to launch
+  # Traefik. This is required on WSL installations that do not run systemd.
+  _wire_podman_socket
+
   local _net="traefik"
   local _cname="traefik"
 
@@ -2536,6 +2582,7 @@ _ensure_global_traefik() {
   if [[ -z "$_sock" || ! -S "$_sock" ]]; then
     for _s in \
       /var/folders/*/T/podman/podman-machine-default-api.sock \
+      /run/podman/podman.sock \
       /run/user/$(id -u)/podman/podman.sock \
       /tmp/podman-run-$(id -u)/podman/podman.sock; do
       [[ -S "$_s" ]] && _sock="$_s" && break
@@ -5537,6 +5584,9 @@ _tw_restart() {
       fi
     fi
     [[ -n "$_url" ]] && break
+    if grep -q "429\|Too Many Requests\|error code: 1015" "$_tlog" 2>/dev/null; then
+      break
+    fi
     sleep 1; _i=$((_i+1))
   done
 
@@ -5557,7 +5607,12 @@ _tw_restart() {
       echo "[watchdog $(date '+%H:%M:%S')] Tunnel started but Traefik registration failed — will retry next cycle"
     fi
   else
-    echo "[watchdog $(date '+%H:%M:%S')] Tunnel did not come up — will retry next cycle"
+    if grep -q "429\|Too Many Requests\|error code: 1015" "$_tlog" 2>/dev/null; then
+      echo "[watchdog $(date '+%H:%M:%S')] Cloudflare rate limited quick tunnels — backing off for 10 minutes"
+      sleep 600
+    else
+      echo "[watchdog $(date '+%H:%M:%S')] Tunnel did not come up — will retry next cycle"
+    fi
   fi
 }
 
