@@ -5368,10 +5368,13 @@ _follow_logs() {
 _start_tunnel_watchdog() {
   local watchdog_pid_file="/tmp/${PROJECT_NAME}-tunnel-watchdog.pid"
 
-  # Kill any existing watchdog first
+  # Keep an existing watchdog. Restarting it on every dev.sh run used to reset
+  # Cloudflare's cooldown and repeatedly extend quick-tunnel rate limits.
   if [[ -f "$watchdog_pid_file" ]]; then
     local old_pid; old_pid=$(cat "$watchdog_pid_file" 2>/dev/null || true)
-    [[ -n "$old_pid" ]] && kill "$old_pid" 2>/dev/null || true
+    if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+      return 0
+    fi
     rm -f "$watchdog_pid_file"
   fi
 
@@ -5400,6 +5403,7 @@ _start_tunnel_watchdog() {
 #!/bin/bash
 # Args: pname rdir lhost tlog tpid wpid [tunnel_token]
 _pname="$1"; _rdir="$2"; _lhost="$3"; _tlog="$4"; _tpid="$5"; _wpid="$6"; _tok="${7:-}"
+_retry_file="/tmp/${_pname}-tunnel-retry-after"
 
 echo $$ > "$_wpid"
 
@@ -5542,6 +5546,19 @@ _tw_url_healthy() {
 
 _tw_restart() {
   local _reason="$1"
+
+  # Quick-tunnel 429 responses are account/IP scoped. Preserve the cooldown
+  # across launcher and watchdog restarts instead of requesting more tunnels.
+  if [[ -z "$_tok" && -f "$_retry_file" ]]; then
+    local _retry_after _now
+    _retry_after=$(cat "$_retry_file" 2>/dev/null || echo 0)
+    _now=$(date +%s)
+    if [[ "$_retry_after" =~ ^[0-9]+$ ]] && [[ "$_retry_after" -gt "$_now" ]]; then
+      sleep $(( _retry_after - _now ))
+    fi
+    rm -f "$_retry_file"
+  fi
+
   echo "[watchdog $(date '+%H:%M:%S')] ${_reason} — restarting tunnel..."
 
   # Kill the existing cloudflared process
@@ -5591,6 +5608,7 @@ _tw_restart() {
   done
 
   if [[ -n "$_url" ]]; then
+    rm -f "$_retry_file"
     _tw_save_url "$_url"
     _tw_flush_dns
     # Retry Traefik registration up to 3 times — SSH can be briefly unavailable
@@ -5606,10 +5624,13 @@ _tw_restart() {
     else
       echo "[watchdog $(date '+%H:%M:%S')] Tunnel started but Traefik registration failed — will retry next cycle"
     fi
+    # The web watchdog can recover after dev.sh has already entered the live
+    # monitor. Restore Metro tunnels too so their links return to that monitor.
+    (cd "$_rdir" && bash dev.sh _metro_tunnels_only) || true
   else
     if grep -q "429\|Too Many Requests\|error code: 1015" "$_tlog" 2>/dev/null; then
+      echo $(( $(date +%s) + 600 )) > "$_retry_file"
       echo "[watchdog $(date '+%H:%M:%S')] Cloudflare rate limited quick tunnels — backing off for 10 minutes"
-      sleep 600
     else
       echo "[watchdog $(date '+%H:%M:%S')] Tunnel did not come up — will retry next cycle"
     fi
@@ -8172,6 +8193,13 @@ case "$CMD" in
     _rows=$(mktemp /tmp/${PROJECT_NAME}-status-rows-XXXXXX)
     _draw_status_live "$_rows"
     rm -f "$_rows"
+    ;;
+
+  _metro_tunnels_only)
+    # Internal recovery command used by the tunnel watchdog after Cloudflare's
+    # cooldown expires. It does not rebuild or recreate app containers.
+    _ensure_metro_proxies 2>/dev/null || true
+    _ensure_metro_tunnels
     ;;
 
   service-logs)
