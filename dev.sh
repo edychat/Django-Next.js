@@ -1176,7 +1176,14 @@ _wire_podman_socket() {
       if [[ "$(id -u)" -eq 0 ]]; then
         uid_sock="/run/podman/podman.sock"
       else
-        uid_sock="/run/user/$(id -u)/podman/podman.sock"
+        uid_sock="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+        if [[ -z "$uid_sock" ]]; then
+          if [[ -n "$XDG_RUNTIME_DIR" ]]; then
+            uid_sock="$XDG_RUNTIME_DIR/podman/podman.sock"
+          else
+            uid_sock="/tmp/podman-run-$(id -u)/podman/podman.sock"
+          fi
+        fi
       fi
 
       # WSL without systemd has no socket-activated Podman API. Traefik needs
@@ -3401,6 +3408,8 @@ fi
 _SKIP_SETUP=false
 case "$CMD" in
   status|logs|down|stop|rebuild|disk|_status_only|service-logs|sync) _SKIP_SETUP=true ;;
+  # ios/android only need Xcode/ADB/Node — no Podman, no Docker deps
+  ios|android) _SKIP_SETUP=true ;;
 esac
 
 # For `build <app> <platform> local` we don't need Podman at all
@@ -3796,25 +3805,27 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
   exit 0
 fi
 
-if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "rebuild" && "$_BUILD_LOCAL" != "true" && "$_BUILD_EAS" != "true" ]]; then
+if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "rebuild" && "$CMD" != "ios" && "$CMD" != "android" && "$_BUILD_LOCAL" != "true" && "$_BUILD_EAS" != "true" ]]; then
   ensure_podman_running
 fi
-if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "stop" && "$CMD" != "logs" ]]; then
+if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "stop" && "$CMD" != "logs" && "$CMD" != "ios" && "$CMD" != "android" ]]; then
   _ensure_global_traefik
   _ensure_hosts_entry
 fi
 # Start the backend proxy on localhost:8000 → Traefik on every startup.
 # Lets the Android emulator (adb reverse tcp:8000 tcp:8000) and iOS simulator
 # reach the backend at http://localhost:8000/api. Idempotent.
-if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "stop" && "$CMD" != "down" && "$CMD" != "logs" ]]; then
+if [[ "$CMD" != "status" && "$CMD" != "_status_only" && "$CMD" != "stop" && "$CMD" != "down" && "$CMD" != "logs" && "$CMD" != "ios" && "$CMD" != "android" ]]; then
   _start_backend_proxy 2>/dev/null || true
 fi
 # Ensure Metro rewriting proxies are running (tunnel → rewrites localhost:PORT → tunnel URL).
 if [[ "$CMD" == "" || "$CMD" == "mobile" || "$CMD" == "up" || "$CMD" == "core" ]]; then
   _ensure_metro_proxies 2>/dev/null || true
 fi
-detect_compose
-_wire_podman_socket
+if [[ "$CMD" != "ios" && "$CMD" != "android" ]]; then
+  detect_compose
+  _wire_podman_socket
+fi
 # DC_CMD / PROJECT_NAME / COMPOSE_FILE are used directly everywhere — no $DC shorthand needed.
 
 gen_mobile_yaml() {
@@ -9035,384 +9046,230 @@ case "$CMD" in
     ;;
 
   ios)
-    # ./dev.sh ios [<app>] — Boot simulator, install cached build/IPA, launch app
+    # ./dev.sh ios [<app>] — Boot simulator, install cached builds/IPAs, launch apps
     # Optional second argument filters to a specific app (case-insensitive substring match).
     _ios_filter="${2:-}"
     echo "📱 Starting iOS development environment..."
     echo ""
-    
-    # Check if we're on macOS
+
     if [[ "$OS" != "mac" ]]; then
-      echo "❌ iOS development is only available on macOS"
+      echo "❌ iOS simulator is only available on macOS"
       exit 1
     fi
-    
-    # Check if Xcode is installed
-    if ! xcode-select -p &>/dev/null 2>&1; then
-      echo "❌ Xcode is not installed. Install from the App Store:"
-      echo "   https://apps.apple.com/app/xcode/id497799835"
+
+    # Require full Xcode — simctl is not available in Command Line Tools alone
+    if ! xcrun simctl list &>/dev/null 2>&1; then
+      echo "❌ Xcode is required. Install it from the App Store, then:"
+      echo "   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
       exit 1
     fi
-    
-    # Find mobile apps
+
+    # ── Discover and filter apps ──────────────────────────────────────────────
     discover_apps
     if [[ ${#MOBILE_APPS[@]} -eq 0 ]]; then
       echo "❌ No mobile apps found in frontend/mobile/"
       exit 1
     fi
-    
-    # ── Discover IPAs in builds directory ─────────────────────────────────────
-    builds_dir="$ROOT_DIR/frontend/mobile/builds"
-    ipa_files=()
-    if [[ -d "$builds_dir" ]]; then
-      while IFS= read -r -d '' ipa; do
-        ipa_files+=("$ipa")
-      done < <(find "$builds_dir" -maxdepth 1 -name "*.ipa" -print0 2>/dev/null)
-    fi
-    
-    # Track which apps were installed from IPAs (by slug)
-    _installed_app_slugs=()
-    
-    # ── Install IPAs from builds directory first ──────────────────────────────
-    if [[ ${#ipa_files[@]} -gt 0 ]]; then
-      echo ""
-      echo "📦 Installing ${#ipa_files[@]} IPA(s) from builds directory..."
-      
-      for ipa in "${ipa_files[@]}"; do
-        ipa_name=$(basename "$ipa")
-        echo ""
-        echo "📲 Installing $ipa_name..."
-        
-        # Extract the .app from the IPA (IPAs are just zip files)
-        temp_dir=$(mktemp -d)
-        unzip -q "$ipa" -d "$temp_dir" 2>/dev/null || {
-          echo "   ⚠️  Failed to extract IPA"
-          rm -rf "$temp_dir"
-          continue
-        }
-        
-        # Find the .app inside the Payload directory
-        app_path=$(find "$temp_dir/Payload" -name "*.app" -maxdepth 1 | head -1)
-        
-        if [[ -z "$app_path" ]]; then
-          echo "   ⚠️  No .app found in IPA"
-          rm -rf "$temp_dir"
-          continue
-        fi
-        
-        # Install the app
-        if xcrun simctl install "$_sim_udid" "$app_path" 2>/dev/null; then
-          echo "   ✅ Installed $ipa_name"
-          
-          # Track which app this was (extract folder name from filename)
-          # "MyApp.ipa"             -> "MyApp"
-          # "MyApp (development).ipa" -> "MyApp"
-          # "MyApp Driver (development).ipa" -> "MyApp Driver"
-          ipa_slug=$(basename "$ipa" .ipa | sed 's/ ([^)]*)$//')
-          _installed_app_slugs+=("$ipa_slug")
-          
-          # Try to launch the app
-          bundle_id=$(defaults read "$app_path/Info.plist" CFBundleIdentifier 2>/dev/null || true)
-          if [[ -n "$bundle_id" ]]; then
-            echo "   🚀 Launching $bundle_id..."
-            xcrun simctl launch "$_sim_udid" "$bundle_id" 2>/dev/null || true
-          fi
-        else
-          echo "   ⚠️  Failed to install $ipa_name"
-        fi
-        
-        # Clean up
-        rm -rf "$temp_dir"
-      done
-      
-      echo ""
-      echo "✅ Finished installing IPAs from builds/"
-    fi
-    
-  
+
     if [[ -n "$_ios_filter" && "$_ios_filter" != "--rebuild" ]]; then
-      _filtered_apps=()
+      _filtered=()
       for _fa in "${MOBILE_APPS[@]}"; do
-        if echo "$_fa" | grep -qi "$_ios_filter"; then
-          _filtered_apps+=("$_fa")
-        fi
+        echo "$_fa" | grep -qi "$_ios_filter" && _filtered+=("$_fa")
       done
-      if [[ ${#_filtered_apps[@]} -eq 0 ]]; then
+      if [[ ${#_filtered[@]} -eq 0 ]]; then
         echo "❌ No app matching '$_ios_filter' found. Available apps:"
         for _fa in "${MOBILE_APPS[@]}"; do echo "   - $_fa"; done
         exit 1
       fi
-      MOBILE_APPS=("${_filtered_apps[@]}")
+      MOBILE_APPS=("${_filtered[@]}")
       echo "   Targeting: ${MOBILE_APPS[*]}"
       echo ""
     fi
-    
-    # ── Boot simulator ────────────────────────────────────────────────────────
-    echo "🚀 Starting iOS simulator..."
-    
-    # Prefer a booted simulator; fall back to plain "iPhone 17" then any iPhone
+
+    # ── Pick simulator ────────────────────────────────────────────────────────
+    # Prefer already-booted; then exact "iPhone 17 (" (excludes Pro/Max/Plus); then any iPhone
     _sim_line=$(xcrun simctl list devices available iPhone | grep "Booted" | head -1 || true)
     if [[ -z "$_sim_line" ]]; then
-      # Prefer exact "iPhone 17 (" — excludes Pro, Pro Max, Plus, etc.
       _sim_line=$(xcrun simctl list devices available iPhone | grep -E '^\s+iPhone 17 \(' | head -1 || true)
     fi
     [[ -z "$_sim_line" ]] && _sim_line=$(xcrun simctl list devices available iPhone | grep "iPhone" | head -1 || true)
-    
+
     _sim_name=$(echo "$_sim_line" | sed 's/^[[:space:]]*//' | cut -d'(' -f1 | xargs)
     _sim_udid=$(echo "$_sim_line" | grep -oE '\([A-F0-9-]+\)' | head -1 | tr -d '()')
-    
+
     if [[ -z "$_sim_udid" ]]; then
       echo "❌ No iPhone simulator found. Create one in Xcode → Window → Devices and Simulators."
       exit 1
     fi
-    
+
     echo "   Using: $_sim_name ($_sim_udid)"
-    
-    # Boot if not already booted
+
+    # ── Open simulator app ────────────────────────────────────────────────────
+    # Tries every known location so it works across Xcode versions including
+    # Xcode 26+ beta where Simulator.app was replaced by DeviceHub.
+    _open_simulator() {
+      local _xdev; _xdev=$(xcode-select -p 2>/dev/null || true)
+      # Standard Xcode (≤15): Simulator.app lives inside the developer dir
+      [[ -n "$_xdev" && -d "$_xdev/Applications/Simulator.app" ]] && \
+        open "$_xdev/Applications/Simulator.app" 2>/dev/null && return 0
+      # Older Xcode: open by bundle ID
+      open -b com.apple.iphonesimulator 2>/dev/null && return 0
+      # Generic App Store name
+      open -a Simulator 2>/dev/null && return 0
+      # Xcode 26+ beta: Simulator.app removed, DeviceHub is the simulator UI
+      [[ -n "$_xdev" && -d "$_xdev/../Applications/DeviceHub.app" ]] && \
+        open "$_xdev/../Applications/DeviceHub.app" 2>/dev/null && return 0
+      true
+    }
+
+    # ── Boot if needed ────────────────────────────────────────────────────────
     _sim_state=$(xcrun simctl list devices | grep "$_sim_udid" | grep -oE '\(Booted\)' || true)
     if [[ -z "$_sim_state" ]]; then
       echo "   Booting simulator (this can take up to 90s on first boot)..."
-      # Open the Simulator app first so the user sees visual progress
-      open -a Simulator
+      _open_simulator
       xcrun simctl boot "$_sim_udid" 2>/dev/null || true
-      # Wait until the simulator is fully booted (up to 90s)
       _boot_waited=0
       while [[ $_boot_waited -lt 90 ]]; do
         _sim_state=$(xcrun simctl list devices | grep "$_sim_udid" | grep -oE '\(Booted\)' || true)
         [[ -n "$_sim_state" ]] && break
         sleep 2; _boot_waited=$((_boot_waited + 2))
-        # Print a dot every 10s so the user knows it's still working
         (( _boot_waited % 10 == 0 )) && printf "   ⏳ Still booting... (%ds)\n" "$_boot_waited"
       done
-      if [[ -n "$_sim_state" ]]; then
-        echo "   ✅ Simulator booted"
-      else
-        echo "   ⚠️  Simulator boot timed out — it may still be starting. Continuing..."
-      fi
+      [[ -n "$_sim_state" ]] && echo "   ✅ $_sim_name booted" || echo "   ⚠️  Boot timed out — may still be starting"
     else
-      echo "   ✅ Simulator already booted"
-      # Open the Simulator app so the window appears
-      open -a Simulator
+      _open_simulator
+      echo "   ✅ $_sim_name already running"
     fi
-    
-    # ── Metro bundler ─────────────────────────────────────────────────────────
-    # Compute per-app Metro ports using the same alphabetical ordering as gen_mobile_yaml.
-    # Uses parallel arrays for bash 3 compatibility (declare -A not available on macOS default bash).
-    _all_apps_sorted=()
-    while IFS= read -r -d '' _d; do
-      _n=$(basename "$_d")
-      [[ "$_n" == "node_modules" || "$_n" == "shared" || "$_n" == "scripts" || "$_n" == "builds" ]] && continue
-      [[ -f "$_d/package.json" ]] || continue
-      _all_apps_sorted+=("$_n")
-    done < <(find "$MOBILE_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
-    _all_apps_sorted_str=$(printf '%s\n' "${_all_apps_sorted[@]}" | sort -f)
 
-    # Build parallel arrays: _metro_app_names[i] and _metro_app_ports[i]
-    _metro_app_names=()
-    _metro_app_ports=()
-    _port_counter=8081
-    while IFS= read -r _aname; do
-      [[ -z "$_aname" ]] && continue
-      _metro_app_names+=("$_aname")
-      _metro_app_ports+=("$_port_counter")
-      _port_counter=$((_port_counter + 1))
-    done <<< "$_all_apps_sorted_str"
-
-    # Helper: get metro port for a given app name
-    _get_metro_port() {
-      local _target="$1" _i
-      for _i in "${!_metro_app_names[@]}"; do
-        [[ "${_metro_app_names[$_i]}" == "$_target" ]] && echo "${_metro_app_ports[$_i]}" && return
-      done
-      echo "8081"  # fallback
-    }
-
-    _ios_metro_running=false
-    if _port_in_use 8081; then
-      _ios_metro_running=true
-      echo "✅ Metro already running on port 8081"
+    # ── Install IPAs from builds/ first ──────────────────────────────────────
+    # IPAs are produced by EAS / `./dev.sh build <app> ios`. Installing them
+    # before the per-app loop means the loop can skip apps already covered.
+    _builds_dir="$ROOT_DIR/frontend/mobile/builds"
+    _ipa_files=()
+    if [[ -d "$_builds_dir" ]]; then
+      while IFS= read -r -d '' _ipa; do
+        _ipa_files+=("$_ipa")
+      done < <(find "$_builds_dir" -maxdepth 1 -name "*.ipa" -print0 2>/dev/null)
     fi
-    # ── Per-app build + install ───────────────────────────────────────────────
-    _ios_builds_dir="$ROOT_DIR/frontend/mobile/builds"
-    mkdir -p "$_ios_builds_dir"
-    
-    for folder in "${MOBILE_APPS[@]}"; do
-      _ios_app_dir="$MOBILE_DIR/$folder"
-      _ios_workspace_path="$_ios_app_dir/ios"
-      
-      # Check if this app was already installed from an IPA
-      _skip_app=false
-      for installed_slug in "${_installed_app_slugs[@]}"; do
-        if [[ "$installed_slug" == "$folder" ]]; then
-          _skip_app=true
-          break
-        fi
-      done
-      
-      if [[ "$_skip_app" == "true" ]]; then
-        echo ""
-        echo "⏭️  Skipping '$folder' (already installed from IPA)"
-        continue
-      fi
-      
-      if [[ ! -d "$_ios_workspace_path" ]]; then
-        echo "⚠️  No ios directory for '$folder' — skipping"
-        continue
-      fi
-      
+
+    # Track installed app slugs so the per-app loop can skip them
+    _installed_app_slugs=()
+
+    if [[ ${#_ipa_files[@]} -gt 0 ]]; then
       echo ""
-      echo "📦 Processing '$folder'..."
-      
-      # ── Start Metro if needed ───────────────────────────────────────────────
-      _this_metro_port="${_app_metro_port[$folder]:-8081}"
-      # Determine the hostname Metro should advertise.
-      # Metro always uses LAN IP — zero latency for simulator, works for same-WiFi devices too.
-      _lan_ip=$(_get_lan_ip)
-      _tunnel_url_ios=$(grep "^CLOUDFLARE_TUNNEL_URL=" "$ROOT_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
-      # API URL: tunnel if available, otherwise localhost
-      if [[ -n "$_tunnel_url_ios" ]]; then
-        _metro_api_url="$_tunnel_url_ios"
-      else
-        _metro_api_url="http://localhost:8000"
-      fi
-      if ! _port_in_use "$_this_metro_port"; then
-        echo "   Starting Metro bundler on port $_this_metro_port (LAN: $_lan_ip)..."
-        echo "   API URL: $_metro_api_url"
-        cd "$_ios_app_dir"
-        CLOUDFLARE_TUNNEL_URL="$_tunnel_url_ios" \
-        EXPO_PUBLIC_API_URL="$_metro_api_url" \
-          npx expo start --dev-client --port "$_this_metro_port" --host lan \
-          > "/tmp/metro-${folder}.log" 2>&1 &
-        disown 2>/dev/null || true
-        _ios_waited=0
-        while [[ $_ios_waited -lt 12 ]]; do
-          _port_in_use "$_this_metro_port" && { _ios_metro_running=true; break; }
-          sleep 2; _ios_waited=$((_ios_waited + 2))
-        done
-        if _port_in_use "$_this_metro_port"; then
-          echo "   ✅ Metro running on http://${_lan_ip}:$_this_metro_port"
-        else
-          echo "   ⚠️  Metro still starting — check: tail -f /tmp/metro-${folder}.log"
-        fi
-      else
-        echo "   ✅ Metro already running on port $_this_metro_port"
-      fi
-      
-      # ── Locate the .app — DerivedData first, then builds cache ─────────────
-      # Scope DerivedData search to this app's bundle ID so we never install
-      # the wrong .app when multiple apps share the same DerivedData folder.
-      _ios_bundle_id_expected=$(node -e "
-        try {
-          const cfg = require('$_ios_app_dir/app.config.js');
-          const expo = cfg.expo || cfg;
-          console.log((expo.ios && expo.ios.bundleIdentifier) || '');
-        } catch(e) {
-          try {
-            const j = JSON.parse(require('fs').readFileSync('$_ios_app_dir/app.json','utf8'));
-            const expo = j.expo || j;
-            console.log((expo.ios && expo.ios.bundleIdentifier) || '');
-          } catch(e2) { console.log(''); }
-        }
-      " 2>/dev/null || true)
+      echo "📦 Installing ${#_ipa_files[@]} IPA(s) from builds/..."
 
-      _ios_derived_app=""
-      while IFS= read -r _candidate; do
-        [[ -z "$_candidate" ]] && continue
-        _candidate_bid=$(defaults read "$_candidate/Info.plist" CFBundleIdentifier 2>/dev/null || true)
-        if [[ -n "$_ios_bundle_id_expected" && "$_candidate_bid" == "$_ios_bundle_id_expected" ]]; then
-          _ios_derived_app="$_candidate"
-          break
-        elif [[ -z "$_ios_bundle_id_expected" ]]; then
-          # No expected bundle ID — fall back to first match (old behaviour)
-          _ios_derived_app="$_candidate"
-          break
-        fi
-      done < <(find ~/Library/Developer/Xcode/DerivedData \
-        -name "*.app" \
-        -path "*iphonesimulator*" \
-        -not -path "*.dSYM*" \
-        2>/dev/null)
-      
-      # Also check our builds cache
-      _ios_cached_app="$_ios_builds_dir/${folder}.app"
-      
-      # Decide whether to build or use cache
-      _ios_need_build=true
-      _ios_app_to_install=""
-      
-      if [[ -d "$_ios_derived_app" ]]; then
-        _ios_app_to_install="$_ios_derived_app"
-        _ios_need_build=false
-        echo "   ✅ Using cached build from DerivedData"
-        echo "      $(basename "$_ios_derived_app")"
-      elif [[ -d "$_ios_cached_app" ]]; then
-        _ios_app_to_install="$_ios_cached_app"
-        _ios_need_build=false
-        echo "   ✅ Using cached build from builds/"
-      fi
-      
-      # ── Build if needed ─────────────────────────────────────────────────────
-      if [[ "$_ios_need_build" == "true" ]]; then
-        # Ensure pods are installed
-        if [[ ! -d "$_ios_workspace_path/Pods" ]]; then
-          echo "   📦 Installing CocoaPods..."
-          cd "$_ios_workspace_path"
-          pod install 2>&1 | grep -E "(Installing|Generating|Pod installation complete)" || true
-        fi
-        
-        echo "   🔨 Building iOS app (first build takes a few minutes)..."
-        cd "$_ios_app_dir"
-        npx expo run:ios --device "$_sim_name" 2>&1 | grep -E "(›|✓|✗|error:|warning:|Build Succeeded|Build FAILED)" || true
-        
-        # After build, find the fresh .app in DerivedData
-        _ios_derived_app=$(find ~/Library/Developer/Xcode/DerivedData \
-          -name "*.app" \
-          -path "*iphonesimulator*" \
-          -not -path "*.dSYM*" \
-          2>/dev/null | head -1)
-        
-        if [[ -d "$_ios_derived_app" ]]; then
-          # Cache it to builds/ for next time
-          echo "   💾 Caching build to frontend/mobile/builds/..."
-          rm -rf "$_ios_cached_app"
-          cp -r "$_ios_derived_app" "$_ios_cached_app"
-          _ios_app_to_install="$_ios_cached_app"
-          echo "   ✅ Build complete and cached"
-        else
-          echo "   ❌ Build failed — no .app found in DerivedData"
+      for _ipa in "${_ipa_files[@]}"; do
+        _ipa_name=$(basename "$_ipa")
+        echo ""
+        echo "📲 Installing $_ipa_name..."
+
+        # IPAs are just zip files — extract the .app from Payload/
+        _tmp=$(mktemp -d)
+        unzip -q "$_ipa" -d "$_tmp" 2>/dev/null || {
+          echo "   ⚠️  Failed to extract IPA"
+          rm -rf "$_tmp"
+          continue
+        }
+
+        _app_path=$(find "$_tmp/Payload" -name "*.app" -maxdepth 1 | head -1)
+        if [[ -z "$_app_path" ]]; then
+          echo "   ⚠️  No .app found in IPA"
+          rm -rf "$_tmp"
           continue
         fi
+
+        if xcrun simctl install "$_sim_udid" "$_app_path" 2>/dev/null; then
+          echo "   ✅ Installed $_ipa_name"
+
+          # Track slug: "MyApp (development).ipa" → "MyApp"
+          _ipa_slug=$(basename "$_ipa" .ipa | sed 's/ ([^)]*)$//')
+          _installed_app_slugs+=("$_ipa_slug")
+
+          # Launch immediately
+          _ipa_bundle_id=$(defaults read "$_app_path/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+          if [[ -n "$_ipa_bundle_id" ]]; then
+            echo "   🚀 Launching $_ipa_bundle_id..."
+            xcrun simctl launch "$_sim_udid" "$_ipa_bundle_id" 2>/dev/null || true
+          fi
+        else
+          echo "   ⚠️  Failed to install $_ipa_name"
+        fi
+
+        rm -rf "$_tmp"
+      done
+
+      echo ""
+      echo "✅ Finished installing IPAs from builds/"
+    fi
+
+    # ── Per-app: locate build → install → report Metro status ────────────────
+    _any_installed=false
+    for folder in "${MOBILE_APPS[@]}"; do
+      _ios_app_dir="$MOBILE_DIR/$folder"
+
+      # Skip if already installed from an IPA above
+      for _slug in "${_installed_app_slugs[@]}"; do
+        if [[ "$_slug" == "$folder" ]]; then
+          echo ""
+          echo "⏭️  Skipping '$folder' (already installed from IPA)"
+          continue 2
+        fi
+      done
+
+      _ios_app_to_install=""
+
+      # 1. .app cached in builds/
+      if [[ -d "$_builds_dir/${folder}.app" ]]; then
+        _ios_app_to_install="$_builds_dir/${folder}.app"
       fi
-      
-      # ── Install + launch directly (instant) ────────────────────────────────
-      echo "   📲 Installing on $_sim_name..."
-      xcrun simctl install "$_sim_udid" "$_ios_app_to_install"
-      
-      # Get the bundle ID from the app's Info.plist
-      _ios_bundle_id=$(defaults read "$_ios_app_to_install/Info.plist" CFBundleIdentifier 2>/dev/null || true)
-      
-      if [[ -n "$_ios_bundle_id" ]]; then
-        echo "   🚀 Launching $_ios_bundle_id..."
-        xcrun simctl launch "$_sim_udid" "$_ios_bundle_id" 2>/dev/null || true
-        echo "   ✅ '$folder' running on simulator"
+
+      # 2. DerivedData — scoped to this app's bundle ID to avoid cross-app collisions
+      if [[ -z "$_ios_app_to_install" ]]; then
+        _bid=$(node -e "
+          try { const c=require('$_ios_app_dir/app.config.js'); const e=c.expo||c; console.log((e.ios&&e.ios.bundleIdentifier)||''); }
+          catch(e) { try { const j=JSON.parse(require('fs').readFileSync('$_ios_app_dir/app.json','utf8')); const ex=j.expo||j; console.log((ex.ios&&ex.ios.bundleIdentifier)||''); } catch(e2){console.log('');} }
+        " 2>/dev/null || true)
+        while IFS= read -r _c; do
+          [[ -z "$_c" ]] && continue
+          _cbid=$(defaults read "$_c/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+          # Match by bundle ID when known; fall back to first hit when unknown
+          if [[ -n "$_bid" && "$_cbid" == "$_bid" ]] || [[ -z "$_bid" ]]; then
+            _ios_app_to_install="$_c"; break
+          fi
+        done < <(find ~/Library/Developer/Xcode/DerivedData \
+          -name "*.app" -path "*iphonesimulator*" -not -path "*.dSYM*" 2>/dev/null)
+      fi
+
+      if [[ -n "$_ios_app_to_install" && -d "$_ios_app_to_install" ]]; then
+        echo ""
+        echo "📲 Installing '$folder'..."
+        xcrun simctl install "$_sim_udid" "$_ios_app_to_install" 2>/dev/null && {
+          _ios_bundle_id=$(defaults read "$_ios_app_to_install/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+          [[ -n "$_ios_bundle_id" ]] && xcrun simctl launch "$_sim_udid" "$_ios_bundle_id" 2>/dev/null || true
+          echo "   ✅ '$folder' installed and launched"
+          _any_installed=true
+        } || echo "   ⚠️  Failed to install '$folder'"
+      fi
+    done
+
+    # ── Metro status (check only — use ./dev.sh mobile to start) ─────────────
+    echo ""
+    _port=8081
+    for folder in "${MOBILE_APPS[@]}"; do
+      if _port_in_use "$_port"; then
+        echo "✅ Metro running for '$folder' on port $_port"
       else
-        echo "   ✅ '$folder' installed (launch manually from simulator)"
+        echo "ℹ️  Metro not running for '$folder' — start with: ./dev.sh mobile"
       fi
+      _port=$((_port + 1))
     done
-    
+
     echo ""
-    echo "✅ iOS environment ready!"
-    echo ""
-    echo "   Simulator     : $_sim_name"
-    for _sf in "${MOBILE_APPS[@]}"; do
-      echo "   Metro ($_sf) : http://localhost:${_app_metro_port[$_sf]:-8081}"
-    done
-    echo "   Backend API   : http://localhost:8000"
-    echo ""
-    echo "   Tip: next run is instant (uses cached build)"
-    echo "   To rebuild: ./dev.sh build <app> ios local"
-    echo "   Metro logs: tail -f /tmp/metro-*.log"
+    echo "✅ Simulator: $_sim_name"
+    [[ "$_any_installed" == "false" ]] && echo "   No builds found — run './dev.sh build <app> ios local' to build"
     ;;
+
 
   backup)
     # ── ./dev.sh backup [db] ─────────────────────────────────────────────────
