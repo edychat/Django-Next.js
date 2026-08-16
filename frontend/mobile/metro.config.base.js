@@ -22,16 +22,19 @@ const fs   = require('fs');
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /**
- * Resolve the web/lib directory from an app folder.
- * Handles three environments:
- *   1. Host (Mac dev): <repo>/frontend/mobile/<app>/  → <repo>/frontend/web/lib/
- *   2. Docker volume mount: /app/<app>/               → /app/web/lib/
+ * Resolve the shared code directory from an app folder.
+ * Handles multiple environments:
+ *   1. Host (dev): <repo>/frontend/mobile/<app>/  → <repo>/frontend/web/lib/
+ *   2. Docker/Podman: /app/<app>/                 → /app/shared/
+ *   3. Docker legacy: /app/<app>/                 → /app/web/lib/
  */
 function resolveSharedRoot(appDir) {
   const candidates = [
     // Standard monorepo layout: frontend/mobile/<app>/ → frontend/web/lib/
     path.resolve(appDir, '../../../web/lib'),
-    // Docker mount: /app/<app>/ → /app/web/lib/
+    // Podman/Docker with shared mount: /app/<app>/ → /app/shared/
+    path.resolve(appDir, '../shared'),
+    // Docker legacy mount: /app/<app>/ → /app/web/lib/
     path.resolve(appDir, '../../web/lib'),
   ];
   for (const c of candidates) {

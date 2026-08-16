@@ -159,10 +159,10 @@ services:
       # Compression on a Next.js dev server is not worth the tradeoff anyway.
       #
       # passHostHeader=true ensures Next.js inside the container sees the real
-      # public Host header (e.g. "oldbook.ai.localhost", no port), so the HMR
+      # public Host header (e.g. "myapp.localhost", no port), so the HMR
       # client script it injects into every page builds the WebSocket URL as:
-      #   ws://oldbook.ai.localhost/_next/webpack-hmr  (port 80 = Traefik) ✓
-      # instead of ws://oldbook.ai.localhost:3000/...  (unreachable from browser)
+      #   ws://myapp.localhost/_next/webpack-hmr  (port 80 = Traefik) ✓
+      # instead of ws://myapp.localhost:3000/...  (unreachable from browser)
       #
       # .localhost hostname (high priority)
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.rule=Host(`${PROJECT_HOST}.localhost`)"

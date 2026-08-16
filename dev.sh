@@ -21,6 +21,9 @@
 # ║    ./dev.sh stop                 Stop all containers (keep images/volumes)  ║
 # ║    ./dev.sh down                 Stop + deep clean (images, volumes, cache) ║
 # ║                                    • Stops tunnel too                        ║
+# ║    ./dev.sh down android         Wipe Android emulator back to factory      ║
+# ║                                    • Kills emulator, deletes AVD data       ║
+# ║                                    • Next ./dev.sh android starts fresh     ║
 # ║    ./dev.sh down all             Stop + deep clean ALL projects + delete VM ║
 # ║                                    • Stops tunnel too                        ║
 # ║    ./dev.sh setup                Install all dependencies                   ║
@@ -48,7 +51,7 @@
 # ║    ./dev.sh sync --dry-run       Show what would change, no writes          ║
 # ║    ./dev.sh sync --yes           Auto-accept all (CI mode)                  ║
 # ║    ./dev.sh sync push            Push this project's template files →       ║
-# ║                                    sibling Django-Next.js/ clone            ║
+# ║                                    sibling template repo clone              ║
 # ║    ./dev.sh sync push --dir <p>  Use a specific local clone path            ║
 # ╚═════════════════════════════════════════════════════════════════════════════╝
 #
@@ -58,7 +61,7 @@
 #                                 this script inside Ubuntu automatically)
 #
 #   Sync on Windows: .\dev.ps1 sync [--dry-run] [--yes]
-#                    .\dev.ps1 sync push          (auto-detects sibling Django-Next.js/)
+#                    .\dev.ps1 sync push          (auto-detects sibling template repo/)
 #                    .\dev.ps1 sync push --dir <path>  (explicit path)
 #                    (skips full bootstrap — goes straight to WSL2, fast)
 #
@@ -509,7 +512,7 @@ const readAppConfigJs = (appDir) => {
         androidPackage: pkg ? pkg[1] : null,
         iosBundleId:    bid ? bid[1] : null,
       };
-      // Match getPackageIdentifier('com.myapp', ...) or getPackageIdentifier("com.myapp.driver", ...)
+      // Match getPackageIdentifier('com.myapp', ...) or getPackageIdentifier("com.myapp.module", ...)
       const pkgId = src.match(/getPackageIdentifier\s*\(\s*['"]([^'"]+)['"]/);
       if (pkgId) return {
         androidPackage: pkgId[1],
@@ -2550,8 +2553,8 @@ detect_compose() {
 
 # ── Ensure PROJECT_HOST.localhost resolves locally ────────────────────────────
 # Plain single-label subdomains like myapp.localhost resolve automatically on
-# macOS and modern Linux. But if PROJECT_HOST contains a dot (e.g. oldbook.ai),
-# the resulting hostname oldbook.ai.localhost is a multi-level name that the
+# macOS and modern Linux. But if PROJECT_HOST contains a dot (e.g. myapp.io),
+# the resulting hostname myapp.io.localhost is a multi-level name that the
 # system resolver won't auto-resolve — it needs an /etc/hosts entry.
 # This function adds the entry idempotently using sudo (prompts once if needed).
 _ensure_hosts_entry() {
@@ -2668,7 +2671,7 @@ _ensure_global_traefik() {
       --label "traefik.http.routers.traefik-dashboard.entrypoints=web" \
       --label "traefik.http.routers.traefik-dashboard.service=api@internal" \
       --label "traefik.http.routers.traefik-dashboard.middlewares=traefik-dashboard-redirect" \
-      --label "traefik.http.middlewares.traefik-dashboard-redirect.redirectregex.regex=^http://traefik\\.localhost/?$$" \
+      --label 'traefik.http.middlewares.traefik-dashboard-redirect.redirectregex.regex=^http://traefik\.localhost/?$' \
       --label "traefik.http.middlewares.traefik-dashboard-redirect.redirectregex.replacement=http://traefik.localhost/dashboard/" \
       --label "traefik.http.middlewares.traefik-dashboard-redirect.redirectregex.permanent=false" \
       "${_selinux_args[@]}" \
@@ -2809,7 +2812,7 @@ ensure_podman_running() {
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 # ── Template sync ─────────────────────────────────────────────────────────────
-# Syncs structural files from the Ezodis/Django-Next.js template repo.
+# Syncs structural files from the configured template repo (Ezodis/EliteCar.app).
 #
 # OWNERSHIP MODEL — fully dynamic, zero hardcoded file names:
 #
@@ -2828,7 +2831,7 @@ ensure_podman_running() {
 #                           the template has a file at the same path.
 #                           Exact file paths are also supported.
 # ─────────────────────────────────────────────────────────────────────────────
-_SYNC_TEMPLATE_REPO="Ezodis/Django-Next.js"
+_SYNC_TEMPLATE_REPO="Ezodis/EliteCar.app"
 
 # Path prefixes (or exact paths) that belong to THIS project, not the template.
 # Use trailing / for directories, exact path for single files.
@@ -3139,12 +3142,12 @@ PYEOF
 _run_push_template() {
   # Auto-detect the template repo clone — no --dir needed in typical setups.
   # Search order:
-  #   1. Sibling directory named "Django-Next.js" (works when all projects sit
-  #      in the same parent folder, e.g. C:\edy.chat\ or ~/projects/)
-  #   2. ~/Django-Next.js  (legacy macOS default)
+  #   1. Sibling directory matching the template repo name (works when all projects
+  #      sit in the same parent folder, e.g. C:\edy.chat\ or ~/projects/)
+  #   2. ~/<template-repo-name>  (legacy macOS default)
   local _parent_dir; _parent_dir="$(dirname "$ROOT_DIR")"
   local _clone_dir=""
-  local _repo_dirname; _repo_dirname=$(basename "$_SYNC_TEMPLATE_REPO")  # Django-Next.js
+  local _repo_dirname; _repo_dirname=$(basename "$_SYNC_TEMPLATE_REPO")  # e.g., "EliteCar.app"
 
   # Candidate locations in priority order
   local _candidates=(
@@ -3605,6 +3608,78 @@ _measure_project_storage_kb() {
 
 # stop/down — handle early before ensure_podman_running
 if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
+  # ── ./dev.sh down android — wipe emulator data for a clean slate ────────────
+  if [[ "$CMD" == "down" && "${2:-}" == "android" ]]; then
+    _setup_android_path
+    _adb_bin="${ANDROID_HOME}/platform-tools/adb"
+    _emu_bin="${ANDROID_HOME}/emulator/emulator"
+    _avdmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"
+
+    echo "🗑️  Wiping Android emulator data..."
+    echo ""
+
+    # 1. Kill any running emulator
+    if [[ -x "$_adb_bin" ]]; then
+      _running_emus=$("$_adb_bin" devices 2>/dev/null | grep "^emulator" | awk '{print $1}')
+      if [[ -n "$_running_emus" ]]; then
+        echo "🛑 Killing running emulator(s): $_running_emus"
+        for _emu_serial in $_running_emus; do
+          "$_adb_bin" -s "$_emu_serial" emu kill 2>/dev/null || true
+        done
+        sleep 2
+      else
+        echo "ℹ️  No running emulator found"
+      fi
+    fi
+    # Belt-and-suspenders: kill the emulator process directly
+    pkill -f "emulator.*-avd" 2>/dev/null || true
+    sleep 1
+
+    # 2. Find all AVDs and wipe their data
+    if [[ -x "$_emu_bin" ]]; then
+      _avd_list=$("$_emu_bin" -list-avds 2>/dev/null || true)
+      if [[ -n "$_avd_list" ]]; then
+        while IFS= read -r _avd_name; do
+          [[ -z "$_avd_name" ]] && continue
+          echo "🗑️  Wiping AVD: $_avd_name"
+          # Delete the AVD's userdata/cache partitions (the data, not the AVD config)
+          _avd_data_dir="$HOME/.android/avd/${_avd_name}.avd"
+          if [[ -d "$_avd_data_dir" ]]; then
+            rm -f "$_avd_data_dir/userdata-qemu.img" 2>/dev/null || true
+            rm -f "$_avd_data_dir/userdata-qemu.img.qcow2" 2>/dev/null || true
+            rm -f "$_avd_data_dir/userdata.img" 2>/dev/null || true
+            rm -f "$_avd_data_dir/cache.img" 2>/dev/null || true
+            rm -f "$_avd_data_dir/cache.img.qcow2" 2>/dev/null || true
+            rm -f "$_avd_data_dir/sdcard.img" 2>/dev/null || true
+            rm -f "$_avd_data_dir/sdcard.img.qcow2" 2>/dev/null || true
+            rm -rf "$_avd_data_dir/snapshots" 2>/dev/null || true
+            echo "   ✅ $_avd_name data wiped"
+          else
+            echo "   ⚠️  AVD data dir not found: $_avd_data_dir"
+          fi
+        done <<< "$_avd_list"
+      else
+        echo "ℹ️  No AVDs found — nothing to wipe"
+      fi
+    else
+      echo "⚠️  Android emulator not found at: $_emu_bin"
+      echo "   Run ./dev.sh android to install the SDK first"
+    fi
+
+    # 3. Clear any installed APKs from the builds cache
+    _builds_dir="$ROOT_DIR/frontend/mobile/builds"
+    if [[ -d "$_builds_dir" ]] && ls "$_builds_dir"/*.apk 2>/dev/null | grep -q .; then
+      echo ""
+      echo "🗑️  Removing cached APKs from frontend/mobile/builds/..."
+      rm -f "$_builds_dir"/*.apk 2>/dev/null || true
+      echo "   ✅ APK cache cleared"
+    fi
+
+    echo ""
+    echo "✅ Android emulator wiped. Run './dev.sh android' to start fresh."
+    exit 0
+  fi
+
   # Check flags for down command
   _DOWN_ALL=false
   if [[ "$CMD" == "down" ]]; then
@@ -3634,6 +3709,9 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
     # linux/wsl uses `podman system df` reclaimable totals)
     _SPACE_BEFORE=0
     _SPACE_BEFORE=$(_measure_total_podman_storage_kb 2>/dev/null || echo 0)
+    # Also snapshot total free space on the main volume before deletion,
+    # so we can compute a real delta if the above returns 0.
+    _DF_FREE_BEFORE=$(df -k / 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
     
     echo "🛑 Stopping ALL Podman services (all projects)..."
 
@@ -3775,16 +3853,21 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
     echo ""
     if [[ "$_DOWN_ALL" == "true" ]]; then
       # Everything was pruned before Podman was killed — all the space is gone.
-      # Use _SPACE_AFTER=0 so the delta equals everything that was measured before.
       _SPACE_AFTER=0
       _space_freed_kb=$(( _SPACE_BEFORE - _SPACE_AFTER ))
-      local _clean_msg="✅ All projects cleaned. Run ./dev.sh to start fresh."
+      # Fallback: if file-based measurement returned 0 (machine wasn't running or
+      # files were already gone), use the df free-space delta instead.
+      if [[ $_space_freed_kb -le 0 && -n "${_DF_FREE_BEFORE:-}" ]]; then
+        _df_free_after=$(df -k / 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+        _space_freed_kb=$(( _df_free_after - _DF_FREE_BEFORE ))
+        [[ $_space_freed_kb -lt 0 ]] && _space_freed_kb=0
+      fi
+      _clean_msg="✅ All projects cleaned. Run ./dev.sh to start fresh."
+      echo "$_clean_msg"
       if [[ $_space_freed_kb -gt 0 ]]; then
-        echo "$_clean_msg"
         echo "💾 Space freed: $(_format_size_kb $_space_freed_kb)"
       else
-        echo "$_clean_msg"
-        echo "💾 Space freed: — (nothing found or Podman unavailable)"
+        echo "💾 Space freed: — (already clean or nothing to measure)"
       fi
     else
       # Measure storage after cleanup and report the difference
@@ -3887,11 +3970,12 @@ gen_mobile_yaml() {
     _lan_ip=$(_get_lan_ip)
     _setup_android_path
     local _adb_bin="${ANDROID_HOME}/platform-tools/adb"
-    if [[ -x "$_adb_bin" ]] && "$_adb_bin" devices 2>/dev/null | grep -q "emulator.*device"; then
-      _packager_host="localhost"
-    else
-      _packager_host="$_lan_ip"
-    fi
+    # Always use 0.0.0.0 so Metro is accessible from:
+    # - Within container (localhost)
+    # - From host via port forwarding (0.0.0.0:8081)
+    # - From emulator via adb reverse or tunnel
+    # - From physical devices via tunnel URL
+    _packager_host="0.0.0.0"
     echo "      REACT_NATIVE_PACKAGER_HOSTNAME: \"${_packager_host}\""
     # Expose tunnel URL as informational env var
     local _metro_tunnel_url
@@ -4817,7 +4901,10 @@ _draw_status_live() {
         if [[ "$_label" == mobile-* ]]; then
           local _omurl="${_ometro_urls[$_omidx]:-}"
           local _omname="${_oprojs_apps[$_omidx]:-$_label}"
-          [[ -n "$_omurl" ]] && _row_links+=("${_omurl}	metro")
+          if [[ -n "$_omurl" ]]; then
+            _row_links+=("${_omurl}	metro")
+            _row_links+=("${_omurl}	tunnel")
+          fi
           _omidx=$((_omidx + 1))
         fi
         _draw_status_live_row "$_label" "$_cn" "$_lw" "" "$_sf" "${_row_links[@]}" || true
@@ -4854,7 +4941,10 @@ _draw_status_live() {
       fi
       if [[ "$_label" == mobile-* ]]; then
         local _cmurl="${_cur_metro_urls[$_cur_midx]:-}"
-        [[ -n "$_cmurl" ]] && _crow_links+=("${_cmurl}	metro")
+        if [[ -n "$_cmurl" ]]; then
+          _crow_links+=("${_cmurl}	metro")
+          _crow_links+=("${_cmurl}	tunnel")
+        fi
         _cur_midx=$((_cur_midx + 1))
       fi
       _draw_status_live_row "$_label" "$_cn" "$_lw" "" "$_sf" "${_crow_links[@]}" || true
@@ -5948,14 +6038,16 @@ _install_apps_on_device() {
 
   if [[ ${#builds_apks[@]} -gt 0 ]]; then
     echo ""
-    echo "📦 Installing ${#builds_apks[@]} APK(s) from builds/ directory..."
-    for entry in "${builds_apks[@]}"; do
-      local app_key="${entry%%:*}"
-      echo "   📲 Installing $app_key..."
-      _install_app_on_emulator "$app_key" "$device"
-      installed_app_slugs+=("$app_key")
-    done
-    echo "✅ Finished installing APKs from builds/"
+    # Only install the first app by default to avoid Metro auto-discovery conflicts
+    # User can manually install other apps if needed
+    local first_entry="${builds_apks[0]}"
+    local first_app_key="${first_entry%%:*}"
+    echo "📦 Installing ${first_app_key} from builds/ directory..."
+    echo "   (Only installing first app to avoid Metro port conflicts)"
+    echo "   To install other apps, use: ./dev.sh android-install <app-name>"
+    _install_app_on_emulator "$first_app_key" "$device"
+    installed_app_slugs+=("$first_app_key")
+    echo "✅ Finished installing ${first_app_key}"
   fi
 
   # ── PRIORITY 2: Install locally built APKs (not in builds/) ───────────────
@@ -6547,6 +6639,16 @@ _install_android_sdk() {
 # Boot the Android emulator if not already running; returns the device serial
 _ensure_emulator() {
   _setup_android_path
+  
+  # ── Ensure KVM is available (required for x86_64 emulator) ─────────────────
+  if [[ "$OS" == "wsl" ]] || [[ "$OS" == "linux" ]]; then
+    if [[ ! -e /dev/kvm ]]; then
+      echo "🔧 Loading KVM kernel module..." >&2
+      sudo modprobe kvm-intel 2>/dev/null || sudo modprobe kvm 2>/dev/null || true
+      sudo chmod 666 /dev/kvm 2>/dev/null || true
+    fi
+  fi
+  
   local adb_cmd="${ANDROID_HOME}/platform-tools/adb"
   local emu_cmd="${ANDROID_HOME}/emulator/emulator"
   local avdmanager_cmd="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"
@@ -6714,17 +6816,50 @@ console.log('');
   # Launch app
   if [[ -n "$bundle_id" ]]; then
     echo "🎯 Launching $found_folder..."
-    "$adb_cmd" -s "$device" shell am start -n "${bundle_id}/.MainActivity" 2>/dev/null || true
-    # Port-forward Metro (app→localhost:<port> → host Metro container)
-    "$adb_cmd" -s "$device" reverse "tcp:${metro_port}" "tcp:${metro_port}" 2>/dev/null || true
-    # Port-forward backend API (app→localhost:8000 → host backend container)
-    "$adb_cmd" -s "$device" reverse "tcp:8000" "tcp:8000" 2>/dev/null || true
-    sleep 2
-    local metro_url; metro_url="http%3A%2F%2Flocalhost%3A${metro_port}"
+    
+    # Always setup adb reverse for emulators
+    if [[ "$device" == emulator-* ]]; then
+      # Emulator - use localhost with adb reverse
+      echo "   🔌 Setting up adb reverse for port ${metro_port}..."
+      "$adb_cmd" -s "$device" reverse "tcp:${metro_port}" "tcp:${metro_port}" 2>/dev/null || true
+      "$adb_cmd" -s "$device" reverse "tcp:8000" "tcp:8000" 2>/dev/null || true
+      metro_url_raw="http://10.0.2.2:${metro_port}"
+      echo "   ✓ Using 10.0.2.2:${metro_port} (Android emulator host alias)"
+    else
+      # Physical device - check for tunnel URL
+      local metro_tunnel_url
+      metro_tunnel_url=$(grep "^METRO_TUNNEL_URL_${metro_port}=" "$ROOT_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+      
+      if [[ -n "$metro_tunnel_url" ]]; then
+        metro_url_raw="$metro_tunnel_url"
+        echo "   🌐 Using tunnel URL: $metro_tunnel_url"
+      else
+        echo "   ⚠️  No tunnel URL found - falling back to localhost"
+        "$adb_cmd" -s "$device" reverse "tcp:${metro_port}" "tcp:${metro_port}" 2>/dev/null || true
+        "$adb_cmd" -s "$device" reverse "tcp:8000" "tcp:8000" 2>/dev/null || true
+        metro_url_raw="http://localhost:${metro_port}"
+      fi
+    fi
+    
+    # URL-encode the Metro URL for the deep link
+    local metro_url; metro_url=$(printf '%s' "$metro_url_raw" | sed 's/:/%3A/g; s/\//%2F/g')
+    
+    echo "   📱 Connecting to Metro: $metro_url_raw"
+    
+    # Use the Expo Dev Client deep link to directly connect to Metro
+    # This bypasses auto-discovery and connects immediately
     "$adb_cmd" -s "$device" shell am start \
       -a android.intent.action.VIEW \
       -d "exp+${slug}://expo-development-client/?url=${metro_url}" \
       "$bundle_id" 2>/dev/null || true
+    
+    # Small delay to ensure deep link is processed
+    sleep 1
+    
+    # Now bring the app to foreground
+    "$adb_cmd" -s "$device" shell am start -n "${bundle_id}/.MainActivity" 2>/dev/null || true
+    
+    echo "   ✅ App launched with automatic Metro connection"
   fi
 }
 
@@ -8045,6 +8180,15 @@ _do_build() {
           echo "❌ npx not found. Install Node.js first."
           exit 1
         fi
+        # Install node_modules first if expo binary is missing — same logic as android path
+        if [[ ! -x "$MOBILE_DIR/$build_folder/node_modules/.bin/expo" ]]; then
+          echo "📦 node_modules not fully installed — running npm install for '$build_folder'..."
+          (cd "$MOBILE_DIR/$build_folder" && npm install --legacy-peer-deps) || {
+            echo "❌ npm install failed for '$build_folder'."
+            exit 1
+          }
+          echo "✅ node_modules installed."
+        fi
         (cd "$MOBILE_DIR/$build_folder" && npx --yes expo prebuild --platform ios --no-install) || {
           echo "❌ expo prebuild failed."
           exit 1
@@ -8086,6 +8230,87 @@ _do_build() {
         echo "✅ CocoaPods installed."
       fi
 
+      # ── Patch hermes-utils.rb to survive DNS/network failures ────────────
+      # Ruby's backtick curl and Net::HTTP both hang/crash when network checks
+      # for Hermes tarballs time out (e.g. central.sonatype.com DNS failure or
+      # Ruby 4.x curl backtick hang). We patch hermes_artifact_exists to use
+      # a short curl timeout, and nightly_artifact_exists to rescue exceptions.
+      local _hermes_utils="$MOBILE_DIR/$build_folder/node_modules/react-native/sdks/hermes-engine/hermes-utils.rb"
+      if [[ -f "$_hermes_utils" ]] && ! grep -q 'HERMES_UTILS_NETWORK_PATCH' "$_hermes_utils" 2>/dev/null; then
+        echo "🔧 Patching hermes-utils.rb for network resilience..."
+        # Add --max-time 10 to curl so it doesn't hang indefinitely
+        _sed_inplace \
+          's|curl -o /dev/null --silent -Iw|curl --max-time 10 -o /dev/null --silent -Iw|g' \
+          "$_hermes_utils"
+        # Wrap the Net::HTTP nightly check in a rescue so a DNS failure returns ""
+        _sed_inplace \
+          's|def nightly_artifact_exists(version)|def nightly_artifact_exists(version) # HERMES_UTILS_NETWORK_PATCH|g' \
+          "$_hermes_utils"
+        python3 - "$_hermes_utils" << 'PATCH_HERMES_EOF'
+import re, sys
+path = sys.argv[1]
+src = open(path).read()
+# Wrap the body of nightly_tarball_url in a begin/rescue so DNS errors return ""
+old = r'(def nightly_tarball_url\(version\)\n)'
+new = r'\1  begin\n'
+src = re.sub(old, new, src)
+# Find the end of nightly_tarball_url (the closing "end" before next def/end of file)
+# Add rescue wrapper before the final "end" of the function
+src = src.replace(
+    '  return final_url\n  else\n    return ""\n  end\nend\n\ndef resolve_url_redirects',
+    '  return final_url\n  else\n    return ""\n  end\n  rescue => _e\n    return ""\n  end\nend\n\ndef resolve_url_redirects'
+)
+open(path, 'w').write(src)
+print("   ✅ hermes-utils.rb patched")
+PATCH_HERMES_EOF
+      fi
+
+      # ── Ensure Podfile has deployment target fix for Xcode 26+ ────────────
+      # Xcode 26 beta requires iOS ≥ 15.0. Some pods ship with 12.x minimums.
+      # Inject the fix into the post_install hook if not already present.
+      local _podfile="$ios_dir/Podfile"
+      if [[ -f "$_podfile" ]] && ! grep -q "IPHONEOS_DEPLOYMENT_TARGET.*15.0" "$_podfile" 2>/dev/null; then
+        echo "🔧 Patching Podfile: bumping pod deployment targets to iOS 15.0..."
+        _sed_inplace '/react_native_post_install(/,/^  end$/{
+/^  end$/{
+i\
+    installer.pods_project.targets.each do |t|\
+      t.build_configurations.each do |c|\
+        dv = c.build_settings["IPHONEOS_DEPLOYMENT_TARGET"]\
+        c.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "15.0" if dv && dv.to_f < 15.0\
+      end\
+    end
+}
+}' "$_podfile" 2>/dev/null || true
+        # If sed didn't insert (complex heredoc), do it with Python as fallback
+        if ! grep -q "IPHONEOS_DEPLOYMENT_TARGET.*15.0" "$_podfile" 2>/dev/null; then
+          python3 - "$_podfile" << 'PATCH_PODFILE_EOF'
+import sys, re
+path = sys.argv[1]
+src = open(path).read()
+fix = """
+    # Fix: bump pod deployment targets to iOS 15.0 for Xcode 26+ compatibility
+    installer.pods_project.targets.each do |t|
+      t.build_configurations.each do |c|
+        dv = c.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+        c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' if dv && dv.to_f < 15.0
+      end
+    end"""
+# Insert before the last 'end' inside post_install
+src = re.sub(
+    r'(  post_install do \|installer\|.*?)(  end\nend)',
+    lambda m: m.group(1) + fix + '\n  end\nend',
+    src, flags=re.DOTALL
+)
+open(path, 'w').write(src)
+print("   ✅ Podfile patched")
+PATCH_PODFILE_EOF
+        fi
+        # Re-run pod install so the new hook takes effect
+        echo "📦 Re-running pod install to apply deployment target fix..."
+        (cd "$ios_dir" && pod install 2>&1 | tail -5) || true
+      fi
+
       # ── Run pod install if needed ─────────────────────────────────────────
       # Check Podfile.lock (not just Pods/) — Pods/ can exist partially after a
       # failed install. Podfile.lock is only written on full success.
@@ -8103,7 +8328,7 @@ _do_build() {
         echo "✅ CocoaPods dependencies already installed."
       fi
 
-      # ── Find the workspace to open ────────────────────────────────────────
+      # ── Find the workspace ────────────────────────────────────────────────
       local xcworkspace
       xcworkspace=$(find "$ios_dir" -maxdepth 1 -name "*.xcworkspace" | head -1)
       if [[ -z "$xcworkspace" ]]; then
@@ -8114,25 +8339,101 @@ _do_build() {
         exit 1
       fi
 
-      # ── Open in Xcode ─────────────────────────────────────────────────────
-      local _git_name
-      _git_name="$(git config user.name 2>/dev/null || echo "your Apple ID")"
+      # ── Resolve scheme (prefer scheme matching the folder name) ──────────
+      local _xcw_flag _xcw_key
+      if [[ "$xcworkspace" == *.xcworkspace ]]; then
+        _xcw_flag="-workspace"; _xcw_key="$(basename "$xcworkspace")"
+      else
+        _xcw_flag="-project";   _xcw_key="$(basename "$xcworkspace")"
+      fi
+
+      local _scheme
+      _scheme=$(xcodebuild $_xcw_flag "$xcworkspace" -list 2>/dev/null \
+        | awk '/Schemes:/,0' | grep -v "Schemes:" | awk '{$1=$1;print}' \
+        | grep -i "$(echo "$build_folder" | tr ' ' '-')" | head -1 || true)
+      # Fallback: first non-pod scheme
+      if [[ -z "$_scheme" ]]; then
+        _scheme=$(xcodebuild $_xcw_flag "$xcworkspace" -list 2>/dev/null \
+          | awk '/Schemes:/,0' | grep -v "Schemes:" | awk '{$1=$1;print}' \
+          | grep -v "^$\|Pods-\|EAS\|EX\|Expo\|React\|hermes\|RNSVG\|RNC\|RNS\|expo-\|react-native-\|Yoga\|UMApp\|Yoga" \
+          | head -1 || true)
+      fi
+      [[ -z "$_scheme" ]] && _scheme="$build_folder"
+
+      # ── Pick booted simulator (or first available iPhone) ─────────────────
+      local _sim_udid _sim_name
+      _sim_udid=$(xcrun simctl list devices booted 2>/dev/null \
+        | grep "iPhone" | head -1 | grep -oE '\([A-F0-9-]+\)' | tr -d '()' || true)
+      if [[ -z "$_sim_udid" ]]; then
+        _sim_udid=$(xcrun simctl list devices available iPhone 2>/dev/null \
+          | grep "iPhone" | head -1 | grep -oE '\([A-F0-9-]+\)' | tr -d '()' || true)
+      fi
+      _sim_name=$(xcrun simctl list devices 2>/dev/null \
+        | grep "$_sim_udid" | sed 's/^[[:space:]]*//' | cut -d'(' -f1 | xargs || true)
+
+      # ── Build output dir ──────────────────────────────────────────────────
+      local _build_out="$ios_dir/build/simulator"
+      mkdir -p "$_build_out"
+
       echo ""
       echo "========================================="
-      echo "📂 Opening in Xcode: $build_folder"
+      echo "🔨 Building for simulator: $build_folder"
+      echo "   Workspace: $(basename "$xcworkspace")"
+      echo "   Scheme:    $_scheme"
+      echo "   Simulator: ${_sim_name:-iPhone}"
       echo "========================================="
-      open "$xcworkspace"
       echo ""
-      echo "✅ Project opened in Xcode."
-      echo ""
-      echo "   Next steps in Xcode:"
-      echo "   1. Select the '${build_folder}' scheme in the toolbar"
-      echo "   2. Go to Signing & Capabilities → enable 'Automatically manage signing'"
-      echo "   3. Set your Team ($_git_name)"
-      echo "   4. Press ⌘R to build and run on the simulator"
-      echo ""
-      echo "   Once built, the .app will be cached in DerivedData and"
-      echo "   './dev.sh ios' will pick it up automatically next time."
+
+      # Boot simulator now so it's ready when install runs
+      if [[ -n "$_sim_udid" ]]; then
+        xcrun simctl boot "$_sim_udid" 2>/dev/null || true
+      fi
+
+      # ── xcodebuild ───────────────────────────────────────────────────────
+      if xcodebuild \
+          $_xcw_flag "$xcworkspace" \
+          -scheme "$_scheme" \
+          -configuration Debug \
+          -destination "platform=iOS Simulator,id=${_sim_udid:-booted}" \
+          -derivedDataPath "$_build_out" \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          build 2>&1 | grep -E "^(error:|warning: |Build succeeded|FAILED|❌|\.swift:|\.m:)"; then
+
+        # ── Locate built .app ─────────────────────────────────────────────
+        local _built_app
+        _built_app=$(find "$_build_out/Build/Products" -name "*.app" \
+          -not -path "*.dSYM*" -maxdepth 3 2>/dev/null | head -1)
+
+        if [[ -n "$_built_app" && -d "$_built_app" ]]; then
+          # Copy to builds/ so ./dev.sh ios picks it up
+          local _output_dir="$ROOT_DIR/frontend/mobile/builds"
+          mkdir -p "$_output_dir"
+          rm -rf "$_output_dir/${build_folder}.app"
+          cp -R "$_built_app" "$_output_dir/${build_folder}.app"
+
+          echo ""
+          echo "✅ Build succeeded → frontend/mobile/builds/${build_folder}.app"
+          echo ""
+          echo "   Install on simulator now:"
+          echo "   ./dev.sh ios"
+        else
+          echo ""
+          echo "⚠️  Build succeeded but .app not found in $_build_out"
+          echo "   Try running: ./dev.sh ios"
+        fi
+      else
+        echo ""
+        echo "❌ Build failed. Opening Xcode for manual signing/build..."
+        open "$xcworkspace"
+        echo ""
+        echo "   In Xcode:"
+        echo "   1. Select the '$_scheme' scheme"
+        echo "   2. Signing & Capabilities → enable Automatically manage signing"
+        echo "   3. Set your Team"
+        echo "   4. Press ⌘R"
+      fi
     else
       echo "❌ Unknown platform '$build_platform'. Use android or ios."
       exit 1
@@ -9224,7 +9525,15 @@ case "$CMD" in
         _ios_app_to_install="$_builds_dir/${folder}.app"
       fi
 
-      # 2. DerivedData — scoped to this app's bundle ID to avoid cross-app collisions
+      # 2. Local build output (ios/build/simulator) — produced by ./dev.sh build <app> ios local
+      if [[ -z "$_ios_app_to_install" ]]; then
+        _local_sim_build=$(find "$_ios_app_dir/ios/build/simulator/Build/Products" \
+          -name "*.app" -not -path "*.dSYM*" -maxdepth 3 2>/dev/null | head -1 || true)
+        [[ -n "$_local_sim_build" && -d "$_local_sim_build" ]] && \
+          _ios_app_to_install="$_local_sim_build"
+      fi
+
+      # 3. DerivedData — scoped to this app's bundle ID to avoid cross-app collisions
       if [[ -z "$_ios_app_to_install" ]]; then
         _bid=$(node -e "
           try { const c=require('$_ios_app_dir/app.config.js'); const e=c.expo||c; console.log((e.ios&&e.ios.bundleIdentifier)||''); }
@@ -9232,7 +9541,11 @@ case "$CMD" in
         " 2>/dev/null || true)
         while IFS= read -r _c; do
           [[ -z "$_c" ]] && continue
-          _cbid=$(defaults read "$_c/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+          # Skip empty .app stubs (Index.noindex builds only have Frameworks/, no binary)
+          _c_binary=$(find "$_c" -maxdepth 1 -type f -perm +0111 2>/dev/null | head -1 || true)
+          [[ -z "$_c_binary" ]] && continue
+          _cbid=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$_c/Info.plist" 2>/dev/null \
+            || defaults read "$_c/Info.plist" CFBundleIdentifier 2>/dev/null || true)
           # Match by bundle ID when known; fall back to first hit when unknown
           if [[ -n "$_bid" && "$_cbid" == "$_bid" ]] || [[ -z "$_bid" ]]; then
             _ios_app_to_install="$_c"; break

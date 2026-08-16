@@ -1,6 +1,9 @@
 # Line ending rules — specific patterns override the auto catch-all below.
 # Rules are matched top-to-bottom; first match wins.
 
+# Everything else — auto-detect (must be FIRST so specific rules below override it)
+*            text=auto
+
 # Windows-only files — must stay CRLF
 *.bat        text eol=crlf
 *.ps1        text eol=crlf
@@ -40,5 +43,5 @@
 *.gz         binary
 *.tar        binary
 
-# Everything else — auto-detect
+# Everything else — auto-detect (must be FIRST so specific rules below override it)
 *            text=auto
