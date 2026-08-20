@@ -151,12 +151,12 @@ if REDIS_URL:
             'OPTIONS': {
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',
                 'CONNECTION_POOL_KWARGS': {
-                    'max_connections': 50,
+                    'max_connections': int(os.getenv('REDIS_MAX_CONNECTIONS', '50')),
                     'retry_on_timeout': True,
                 },
             },
             'KEY_PREFIX': BASE_DIR.parent.name.lower().replace(' ', '_').replace('-', '_'),
-            'TIMEOUT': 300,  # 5 minutes
+            'TIMEOUT': int(os.getenv('CACHE_TIMEOUT', '300')),  # 5 minutes default
         }
     }
     SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
@@ -166,7 +166,7 @@ else:
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'TIMEOUT': 300,
+            'TIMEOUT': int(os.getenv('CACHE_TIMEOUT', '300')),
         }
     }
     SESSION_ENGINE = 'django.contrib.sessions.backends.db'
@@ -187,12 +187,12 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalisation ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
 
-LANGUAGE_CODE = 'es-mx'
+LANGUAGE_CODE = os.getenv('LANGUAGE_CODE', 'en-us')
 LANGUAGES = [
     ('en', 'English'),
     ('es', 'Spanish'),
 ]
-TIME_ZONE = 'UTC'
+TIME_ZONE = os.getenv('TIME_ZONE', 'UTC')
 USE_I18N = True
 USE_TZ = True
 
@@ -207,8 +207,8 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 PRIVATE_ASSETS_PATH = os.path.join(BASE_DIR.parent, 'private_assets')
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500 MB — max total request size
-FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760   # 10 MB  — stream to disk above this
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', '524288000'))  # 500 MB default
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', '10485760'))   # 10 MB default
 
 
 # REST Framework & JWT ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
@@ -230,14 +230,14 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '10000/hour',
-        'user': '100000/hour',
+        'anon': os.getenv('THROTTLE_ANON', '10000/hour'),
+        'user': os.getenv('THROTTLE_USER', '100000/hour'),
     },
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=int(os.getenv('JWT_ACCESS_TOKEN_HOURS', '1'))),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '7'))),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
@@ -348,7 +348,7 @@ else:
         CSRF_COOKIE_DOMAIN = f".{DOMAIN}"
 
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_AGE = 86400
+SESSION_COOKIE_AGE = int(os.getenv('SESSION_COOKIE_AGE', '86400'))  # 1 day default
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_SAVE_EVERY_REQUEST = False  # Only save modified sessions
 
@@ -361,7 +361,7 @@ X_FRAME_OPTIONS = 'DENY'
 
 if not DEBUG:
     SECURE_SSL_REDIRECT = True
-    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))  # 1 year default
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -374,9 +374,9 @@ EMAIL_BACKEND = (
     if not DEBUG
     else 'django.core.mail.backends.console.EmailBackend'
 )
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', '')

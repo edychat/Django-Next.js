@@ -97,22 +97,53 @@ function createMetroConfig(appDir, overrides = {}) {
     sharedRoot,
     mobileRoot,
   ].filter((v, i, a) => a.indexOf(v) === i);
+  
+  // Add /shared/assets/ if it exists (Docker/Podman root-level mount)
+  if (fs.existsSync('/shared/assets')) {
+    config.watchFolders.push('/shared/assets');
+  }
 
   // ── Resolver aliases ─────────────────────────────────────────────────────
   config.resolver = config.resolver || {};
+  // Don't use extraNodeModules - we handle everything in resolveRequest below
   config.resolver.extraNodeModules = {
     ...(config.resolver.extraNodeModules || {}),
-    '@shared': sharedRoot,
-    '@assets': assetsRoot,
   };
 
-  // Intercept @shared/assets/* requires and return the raw asset path
+  // Intercept @shared/* requires and redirect appropriately
   const _origResolveRequest = config.resolver.resolveRequest;
   config.resolver.resolveRequest = (context, moduleName, platform) => {
+    // Handle @shared/assets/* - look for image/asset files
     if (moduleName.startsWith('@shared/assets/')) {
-      const assetPath = path.join(assetsRoot, moduleName.slice('@shared/assets/'.length));
-      return { type: 'sourceFile', filePath: assetPath };
+      const assetName = moduleName.slice('@shared/assets/'.length);
+      // Try multiple locations for assets:
+      const candidates = [
+        // Docker/Podman: /shared/assets/ (root-level mount)
+        path.join('/shared/assets', assetName),
+        // Host dev: frontend/mobile/shared/assets/
+        path.join(mobileRoot, 'shared/assets', assetName),
+        // Fallback: web/public/ (without assets subdirectory)
+        path.join(path.dirname(assetsRoot), assetName),
+        // Fallback: web/public/assets/
+        path.join(assetsRoot, assetName),
+      ];
+      
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          return { type: 'sourceFile', filePath: candidate };
+        }
+      }
     }
+    
+    // Handle @shared/* (non-assets) - look for TS/JS code
+    if (moduleName.startsWith('@shared/') || moduleName === '@shared') {
+      const subpath = moduleName === '@shared' ? '' : moduleName.slice('@shared/'.length);
+      const resolved = path.join(sharedRoot, subpath);
+      if (fs.existsSync(resolved) || fs.existsSync(resolved + '.ts') || fs.existsSync(resolved + '.tsx')) {
+        return context.resolveRequest(context, resolved, platform);
+      }
+    }
+    
     if (_origResolveRequest) {
       return _origResolveRequest(context, moduleName, platform);
     }

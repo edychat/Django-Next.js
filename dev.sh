@@ -1433,7 +1433,7 @@ update_mobile_ip() {
 discover_apps() {
   MOBILE_APPS=()
   [[ -d "$MOBILE_DIR" ]] || return
-  # Collect names first, then sort alphabetically so port assignment is stable.
+  # Collect names first, then sort with priority order for stable port assignment
   local _names=()
   while IFS= read -r -d '' dir; do
     local name
@@ -1442,11 +1442,29 @@ discover_apps() {
     [[ -f "$dir/package.json" ]] || continue
     _names+=("$name")
   done < <(find "$MOBILE_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
-  # Sort alphabetically (case-insensitive) for stable port assignment
+  # Sort with priority: "EliteCar" (passenger) first, then "EliteCar Driver", then others alphabetically
+  # This ensures: EliteCar → 8081, EliteCar Driver → 8082
   if [[ ${#_names[@]} -gt 0 ]]; then
-    while IFS= read -r name; do
-      MOBILE_APPS+=("$name")
-    done < <(printf '%s\n' "${_names[@]}" | sort -f)
+    local _sorted=()
+    # First: exact match "EliteCar"
+    for name in "${_names[@]}"; do
+      [[ "$name" == "EliteCar" ]] && _sorted+=("$name")
+    done
+    # Second: exact match "EliteCar Driver"
+    for name in "${_names[@]}"; do
+      [[ "$name" == "EliteCar Driver" ]] && _sorted+=("$name")
+    done
+    # Third: everything else, sorted alphabetically
+    local _others=()
+    for name in "${_names[@]}"; do
+      [[ "$name" != "EliteCar" && "$name" != "EliteCar Driver" ]] && _others+=("$name")
+    done
+    if [[ ${#_others[@]} -gt 0 ]]; then
+      while IFS= read -r name; do
+        _sorted+=("$name")
+      done < <(printf '%s\n' "${_others[@]}" | sort -f)
+    fi
+    MOBILE_APPS=("${_sorted[@]}")
   fi
 }
 
@@ -3760,11 +3778,18 @@ if [[ "$CMD" == "stop" || "$CMD" == "down" ]]; then
     echo "🛑 Stopping ${PROJECT_NAME} services..."
     # Scope stop to this project only — never touch containers from other projects.
     # Use -t 1 for 1 second timeout, then force kill. Much faster than default 10s per container.
-    # NOTE: use `podman stop` (not `podman rm`) so containers remain in "exited" state
-    # and `./dev.sh status` shows them as "stopped" rather than "missing".
+    # For `stop`: leave containers in "exited" state so the monitor shows "stopped".
+    # For `down`: remove containers entirely so the monitor drops the project section live.
     _project_containers=$(podman ps --filter "label=io.podman.compose.project=${PROJECT_NAME}" -q 2>/dev/null | tr '\n' ' ' || true)
     if [[ -n "${_project_containers// /}" ]]; then
       podman stop -t 1 $_project_containers 2>/dev/null || true
+    fi
+    if [[ "$CMD" == "down" ]]; then
+      # Also remove exited containers (including ones that were already stopped before this run)
+      _all_project_containers=$(podman ps -a --filter "label=io.podman.compose.project=${PROJECT_NAME}" -q 2>/dev/null | tr '\n' ' ' || true)
+      if [[ -n "${_all_project_containers// /}" ]]; then
+        podman rm $_all_project_containers 2>/dev/null || true
+      fi
     fi
     echo "✅ ${PROJECT_NAME} services stopped."
   fi

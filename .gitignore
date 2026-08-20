@@ -281,19 +281,6 @@ tags
 dump.rdb
 
 ### Project template
-# Project-specific Django apps — never belong in the template repo.
-# Any backend/<app>/ with an __init__.py is a project app, not a template file.
-# sync push skips them automatically; this gitignore ensures they can never
-# be accidentally committed to the template repo either.
-backend/books/
-backend/cart/
-backend/orders/
-backend/payments/
-backend/drivers/
-backend/passengers/
-backend/rides/
-backend/communications/
-
 /media/
 
 # All backend media — uploads, imports, photoprism, chat media. Never commit.

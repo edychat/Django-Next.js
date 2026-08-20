@@ -17,7 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 RUN npm config set fetch-retries 5 \
  && npm config set fetch-retry-mintimeout 20000 \
  && npm config set fetch-retry-maxtimeout 120000 \
- && npm config set fetch-timeout 300000
+ && npm config set fetch-timeout 300000 \
+ && npm config set network-timeout 300000 \
+ && npm config set maxsockets 5 \
+ && npm config set loglevel error
+
+# Copy npm config for better reliability
+COPY frontend/mobile/.npmrc /root/.npmrc
 
 # Copy package manifests and shared assets for layer caching.
 COPY frontend/mobile/ ./
@@ -25,17 +31,27 @@ COPY frontend/web/public/ ./shared/
 
 RUN mkdir -p ./shared
 
-# Install workspace-level deps
-RUN npm install --legacy-peer-deps && npm cache clean --force
+# Install workspace-level deps with timeout protection
+RUN timeout 300 npm install --legacy-peer-deps --prefer-offline --no-audit --progress=false || \
+    (echo "⚠️  Workspace install timed out or failed, retrying..." && npm install --legacy-peer-deps --prefer-offline --no-audit --progress=false) && \
+    npm cache clean --force
 
 # Install per-app deps — fully dynamic, handles any folder name including spaces
+# Added timeout, progress suppression, and parallel installation where safe
 RUN for dir in */; do \
       name="${dir%/}"; \
       case "$name" in node_modules|shared|scripts|packages|builds) continue ;; esac; \
       [ -f "$dir/package.json" ] || continue; \
-      echo "📦 Installing deps for: $name"; \
-      cd "/app/$name" && npm install --legacy-peer-deps && npm cache clean --force && cd /app; \
-    done
+      echo "📦 [$(date +%H:%M:%S)] Installing deps for: $name"; \
+      cd "/app/$name" && \
+      (timeout 300 npm install --legacy-peer-deps --prefer-offline --no-audit --progress=false || \
+       (echo "⚠️  [$(date +%H:%M:%S)] Install for $name timed out, retrying..." && \
+        npm install --legacy-peer-deps --prefer-offline --no-audit --progress=false)) && \
+      npm cache clean --force && \
+      echo "✅ [$(date +%H:%M:%S)] Completed: $name" && \
+      cd /app; \
+    done && \
+    echo "✅ [$(date +%H:%M:%S)] All app dependencies installed successfully"
 
 # ── Final image ────────────────────────────────────────────────────────────────
 FROM node:22-slim
@@ -45,9 +61,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl bash git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @expo/cli@latest && npm cache clean --force \
- && ln -sf /usr/local/lib/node_modules/@expo/cli/build/bin/cli /usr/local/bin/expo \
- && chmod +x /usr/local/bin/expo
+RUN timeout 180 npm install -g @expo/cli@latest --prefer-offline --no-audit --progress=false || \
+    (echo "⚠️  Expo CLI install timed out, retrying..." && npm install -g @expo/cli@latest --prefer-offline --no-audit) && \
+    npm cache clean --force && \
+    ln -sf /usr/local/lib/node_modules/@expo/cli/build/bin/cli /usr/local/bin/expo && \
+    chmod +x /usr/local/bin/expo
 
 # Copy workspace-level node_modules
 COPY --from=deps /app/node_modules ./node_modules

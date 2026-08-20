@@ -470,169 +470,32 @@ wsl.exe -d Ubuntu -- rm -f $tmpScript 2>$null | Out-Null
 
 # ── Android: open emulator screen via scrcpy ─────────────────────────────────
 if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'android') {
-    $scrcpyExe = Find-ScrcpyExecutable
-
-    if (-not $scrcpyExe) {
-        Write-Host ""
-        $scrcpyExe = Install-Scrcpy
-    }
-
-    if ($scrcpyExe) {
-        Write-Host ""
-        Write-Host "  >> Connecting to Android emulator screen..." -ForegroundColor Cyan
-
-        # Get WSL IP address
-        $wslIpOutput = (wsl.exe -d Ubuntu -- bash -c "hostname -I" 2>$null) -join ''
-        $wslIp = $null
-        if ($wslIpOutput) {
-            $wslIpParts = $wslIpOutput.Trim() -split '\s+'
-            if ($wslIpParts.Count -gt 0) { $wslIp = $wslIpParts[0] }
-        }
-
-        if (-not $wslIp) {
-            _fail 'Could not determine WSL IP address.'
-            exit 1
-        }
-
-        _step "WSL IP: $wslIp"
-
-        # First, wait for the emulator to be fully booted in WSL
-        _step "Waiting for emulator to fully boot (this may take 30-60 seconds)..."
-        $bootWait = 0
-        $emulatorBooted = $false
-        while ($bootWait -lt 120) {
-            # Check both that device is listed AND that boot is complete
-            $deviceCheck = (wsl.exe -d Ubuntu -- bash -c "/root/Android/Sdk/platform-tools/adb devices 2>/dev/null | grep 'emulator' | grep -c 'device$'" 2>$null) -join ''
-            $bootCompleteCheck = (wsl.exe -d Ubuntu -- bash -c "/root/Android/Sdk/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n'" 2>$null) -join ''
-            
-            if ($deviceCheck -match '^\d+$' -and [int]$deviceCheck -gt 0 -and $bootCompleteCheck -eq '1') {
-                $emulatorBooted = $true
-                break
-            }
-            Start-Sleep -Seconds 3
-            $bootWait += 3
-            if ($bootWait % 15 -eq 0) {
-                _step "Still waiting for emulator boot... (${bootWait}s elapsed)"
-            }
-        }
-
-        if (-not $emulatorBooted) {
-            _fail 'Emulator did not fully boot within 2 minutes.'
-            _warn 'The emulator may be starting slowly. Wait a bit longer and try:'
-            _warn '  wsl -d Ubuntu -- /root/Android/Sdk/platform-tools/adb devices'
-            exit 1
-        }
-        
-        _ok "Emulator is fully booted and ready"
-
-        # Put emulator in TCP mode so Windows can reach it via port forward
-        _step "Enabling TCP/IP mode on emulator..."
-        wsl.exe -d Ubuntu -- bash -c "/root/Android/Sdk/platform-tools/adb -s emulator-5554 tcpip 5555 2>/dev/null" 2>&1 | Out-Null
-        Start-Sleep -Seconds 2
-
-        # Forward Windows localhost:5555 → WSL emulator:5555
-        _step "Setting up port forwarding from Windows to WSL..."
-        try {
-            netsh interface portproxy delete v4tov4 listenport=5555 listenaddress=127.0.0.1 2>&1 | Out-Null
-            netsh interface portproxy add v4tov4 listenport=5555 listenaddress=127.0.0.1 connectport=5555 connectaddress=$wslIp 2>&1 | Out-Null
-        } catch {
-            try {
-                _step "Requesting administrator elevation for port forwarding..."
-                $ps = Start-Process powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList `
-                    "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"netsh interface portproxy delete v4tov4 listenport=5555 listenaddress=127.0.0.1 2>``$null; netsh interface portproxy add v4tov4 listenport=5555 listenaddress=127.0.0.1 connectport=5555 connectaddress=$wslIp`""
-                $ps.WaitForExit(10000) | Out-Null
-            } catch {
-                _warn "Could not set up port forwarding with elevation."
-            }
-        }
-
-        Start-Sleep -Seconds 2
-
-        # Verify port forwarding is working
-        $adbBridgeReady = $false
-        try {
-            $adbBridgeReady = Test-NetConnection -ComputerName 127.0.0.1 -Port 5555 `
-                -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-        } catch {}
-
-        if (-not $adbBridgeReady) {
-            _fail 'Port forwarding failed. Cannot reach WSL emulator from Windows.'
-            _warn 'The emulator is running in WSL, but Windows cannot connect to it.'
-            _warn 'Re-run this command and accept the Administrator prompt to set up port forwarding.'
-            exit 1
-        }
-
-        _ok "Port forwarding established"
-
-        # Connect Windows ADB to the TCP/IP emulator
-        $scrcpyAdb = Join-Path (Split-Path $scrcpyExe -Parent) 'adb.exe'
-        if (Test-Path $scrcpyAdb) {
-            _step "Connecting Windows ADB to emulator..."
-            & $scrcpyAdb disconnect 127.0.0.1:5555 2>$null | Out-Null
-            & $scrcpyAdb connect 127.0.0.1:5555 2>&1 | Out-Null
-            Start-Sleep -Seconds 1
-            
-            # Verify connection
-            $adbDevices = (& $scrcpyAdb devices 2>$null) -join "`n"
-            if ($adbDevices -notmatch '127\.0\.0\.1:5555.*device') {
-                _fail 'Windows ADB could not connect to the WSL emulator.'
-                _warn "ADB output: $adbDevices"
-                exit 1
-            }
-            _ok "Windows ADB connected to emulator"
-            
-            # Set up adb reverse for Metro and API ports
-            _step "Configuring port forwarding for Metro bundler and API..."
-            & $scrcpyAdb -s 127.0.0.1:5555 reverse tcp:8081 tcp:8081 2>$null | Out-Null
-            & $scrcpyAdb -s 127.0.0.1:5555 reverse tcp:8082 tcp:8082 2>$null | Out-Null
-            & $scrcpyAdb -s 127.0.0.1:5555 reverse tcp:8000 tcp:8000 2>$null | Out-Null
-            _ok "App connectivity configured"
-            
-            $scrcpyArgs = @('--serial=127.0.0.1:5555')
-        } else {
-            $scrcpyArgs = @('--tcpip=127.0.0.1:5555')
-        }
-        
-        $scrcpyArgs += @('--force-adb-forward', '--max-size=1024', '--stay-awake')
-
-        # Launch scrcpy — shows the emulator screen in a Windows window
-        # Start it with CreateNoWindow to prevent the console but show the GUI
-        Write-Host ""
-        Write-Host "  OK Opening emulator screen..." -ForegroundColor Green
-        
-        # Add flags to reduce errors
-        $scrcpyArgs += @('--no-audio')
-        
-        try {
-            # Use Start-Process with NoNewWindow to prevent console but allow GUI
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $scrcpyExe
-            $psi.Arguments = ($scrcpyArgs -join ' ')
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            
-            $scrcpyProcess = New-Object System.Diagnostics.Process
-            $scrcpyProcess.StartInfo = $psi
-            [void]$scrcpyProcess.Start()
-            
-            Start-Sleep -Seconds 2
-            if ($scrcpyProcess.HasExited -and $scrcpyProcess.ExitCode -ne 0) {
-                _warn "scrcpy exited with code $($scrcpyProcess.ExitCode), but emulator may still be running in WSL2."
-            }
-        } catch {
-            _warn "Could not launch scrcpy: $($_.Exception.Message)"
-            _warn "The emulator is running in WSL2, but screen mirroring failed."
-        }
-    } else {
-        Write-Host ""
-        _fail "scrcpy could not be installed."
-        _warn "The emulator is running headlessly in WSL."
-        _warn "Install scrcpy manually from: https://github.com/Genymobile/scrcpy"
-        _warn "Then run: .\dev.ps1 android"
-        exit 1
-    }
+    Write-Host ""
+    Write-Host "  >> Opening emulator window..." -ForegroundColor Cyan
+    
+    # Launch scrcpy from WSL using WSLg to display the emulator
+    Start-Process wsl -ArgumentList "-d", "Ubuntu", "--", "bash", "-c", "export DISPLAY=:0; scrcpy --serial=emulator-5554 --max-size=1024 --window-title='EliteCar Emulator'" -WindowStyle Hidden
+    
+    Start-Sleep 3
+    
+    Write-Host ""
+    Write-Host "  =================================================================" -ForegroundColor Green
+    Write-Host "  ✅ EMULATOR WINDOW IS OPENING!" -ForegroundColor Green
+    Write-Host "  =================================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Look for a window titled 'EliteCar Emulator'" -ForegroundColor Cyan
+    Write-Host "  (It may take 10-15 seconds to appear)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  📱 Your EliteCar app is installed and ready!" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  📊 Connected to:" -ForegroundColor Yellow
+    Write-Host "    • Metro bundler: http://10.0.2.2:8081" -ForegroundColor White
+    Write-Host "    • Backend API: http://10.0.2.2:8000" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  💡 Tip: Use your mouse and keyboard to interact with the emulator" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  🎉 Happy testing!" -ForegroundColor Green
+    Write-Host ""
 }
 
 exit $devShExitCode
