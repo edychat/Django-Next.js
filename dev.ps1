@@ -149,13 +149,6 @@ function Install-Scrcpy {
 # This makes `.\dev.ps1 sync` as fast as possible: no package manager installs,
 # no Podman machine startup, just WSL2 → bash dev.sh sync.
 if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'sync') {
-    # Get project name dynamically from folder
-    $PROJECT_NAME = (Get-Item $ROOT_DIR).Name
-    Write-Host ""
-    Write-Host "  $PROJECT_NAME — sync" -ForegroundColor Blue
-    Write-Host ("  " + ("═" * ($PROJECT_NAME.Length + 8))) -ForegroundColor Blue
-    Write-Host ""
-
     # 1. Verify WSL2 Ubuntu is ready
     if (-not (Test-UbuntuInstalled)) {
         _fail "WSL2 Ubuntu is not installed."
@@ -174,23 +167,27 @@ if ($DevArgs.Count -gt 0 -and $DevArgs[0] -eq 'sync') {
     }
 
     # 3. Ensure minimal tools (curl + python3) are present — idempotent, fast
-    _step "Checking sync prerequisites inside Ubuntu..."
-    @'
+    $prereqScript = @'
 command -v curl    &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq curl;    }
 command -v python3 &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3; }
 echo "  OK curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}')"
 echo "  OK python3 $(python3 --version 2>/dev/null)"
-'@ | wsl.exe -d Ubuntu -- bash -s
-    if ($LASTEXITCODE -ne 0) {
+'@
+    $tmpPrereq = "/tmp/devtools-prereq-$PID.sh"
+    $tmpPrereqWin = "\\wsl.localhost\Ubuntu\tmp\devtools-prereq-$PID.sh"
+    $prereqScriptUnix = $prereqScript -replace "`r`n", "`n" -replace "`r", "`n"
+    [System.IO.File]::WriteAllText($tmpPrereqWin, $prereqScriptUnix, (New-Object System.Text.UTF8Encoding $false))
+    wsl.exe -d Ubuntu -- chmod +x $tmpPrereq
+    wsl.exe -d Ubuntu -- bash $tmpPrereq
+    $prereqExit = $LASTEXITCODE
+    wsl.exe -d Ubuntu -- rm -f $tmpPrereq 2>$null | Out-Null
+    if ($prereqExit -ne 0) {
         _warn "Prerequisite check had warnings (non-fatal, continuing...)"
     }
 
     # 4. Convert path and run dev.sh sync inside WSL2
     $wslRoot2 = Get-WslPath $ROOT_DIR
     $argStr2  = Build-ArgStr $DevArgs
-    Write-Host ""
-    _step "Running dev.sh $argStr2 inside Ubuntu..."
-    Write-Host ""
     $tmpScript2    = "/tmp/devtools-sync-$PID.sh"
     $tmpScript2Win = "\\wsl.localhost\Ubuntu\tmp\devtools-sync-$PID.sh"
     $syncContent = "#!/bin/bash`nexport PATH=`"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:`$HOME/.local/bin`"`ncd '$wslRoot2'`nsed -i 's/\r//' dev.sh`nexec bash dev.sh $argStr2`n"
@@ -203,149 +200,165 @@ echo "  OK python3 $(python3 --version 2>/dev/null)"
 }
 
 # ── full bootstrap (all other commands) ───────────────────────────────────────
-# Get project name dynamically from folder
-$PROJECT_NAME = (Get-Item $ROOT_DIR).Name
-Write-Host ""
-Write-Host "  $PROJECT_NAME Windows Bootstrap" -ForegroundColor Blue
-Write-Host ("  " + ("═" * ($PROJECT_NAME.Length + 20))) -ForegroundColor Blue
-Write-Host ""
 
-# ── 1. Git for Windows ────────────────────────────────────────────────────────
-# Git Bash is used as a fallback if someone runs bash dev.sh directly.
-# The main path (WSL2) doesn't need it, but it's a useful tool to have.
-$BASH = $null
-foreach ($p in @(
-    "$env:PROGRAMFILES\Git\bin\bash.exe",
-    "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe",
-    "C:\Program Files\Git\bin\bash.exe"
-)) { if (Test-Path $p) { $BASH = $p; break } }
+# Quick check: if WSL2 Ubuntu is already working, skip the verbose bootstrap
+$needsBootstrap = $false
+$wslOk = Test-UbuntuInstalled
 
-if (-not $BASH) {
-    $fc = Get-Command bash.exe -ErrorAction SilentlyContinue
-    if ($fc -and $fc.Source -notmatch 'System32') { $BASH = $fc.Source }
+if (-not $wslOk) {
+    $needsBootstrap = $true
+} else {
+    # Test if Ubuntu responds quickly
+    try {
+        $out = (wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>$null) -join ''
+        if ($out -notmatch 'ready') { $needsBootstrap = $true }
+    } catch {
+        $needsBootstrap = $true
+    }
 }
 
-if (-not $BASH) {
-    _step "Git for Windows not found — installing via winget..."
+if ($needsBootstrap) {
+    # Get project name dynamically from folder
+    $PROJECT_NAME = (Get-Item $ROOT_DIR).Name
+    Write-Host ""
+    Write-Host "  $PROJECT_NAME Windows Bootstrap" -ForegroundColor Blue
+    Write-Host ("  " + ("═" * ($PROJECT_NAME.Length + 20))) -ForegroundColor Blue
+    Write-Host ""
 
-    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-        _fail "winget not found. Install App Installer from the Microsoft Store,"
-        _fail "then re-run:  .\dev.ps1"
-        exit 1
-    }
-
-    winget install --id Git.Git --silent --accept-package-agreements --accept-source-agreements --scope machine 2>&1 | Out-Null
-
-    # Refresh PATH
-    $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
-                [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-
+    # ── 1. Git for Windows ────────────────────────────────────────────────────────
+    # Git Bash is used as a fallback if someone runs bash dev.sh directly.
+    # The main path (WSL2) doesn't need it, but it's a useful tool to have.
+    $BASH = $null
     foreach ($p in @(
         "$env:PROGRAMFILES\Git\bin\bash.exe",
         "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe",
         "C:\Program Files\Git\bin\bash.exe"
     )) { if (Test-Path $p) { $BASH = $p; break } }
 
-    if ($BASH) { _ok "Git for Windows installed  ($BASH)" }
-    else {
-        _warn "Git installed but bash.exe not found in PATH yet."
-        _warn "This is fine — WSL2 is the primary runtime. Continuing..."
-    }
-} else {
-    _ok "Git Bash: $BASH"
-}
-
-# ── 2. WSL2 + Ubuntu ─────────────────────────────────────────────────────────
-_step "Checking WSL2 + Ubuntu..."
-
-$wslOk = Test-UbuntuInstalled
-
-if (-not $wslOk) {
-    _step "WSL2 + Ubuntu not found — installing (one-time, ~3-5 min)..."
-    _step "A UAC prompt may appear — please accept it."
-    Write-Host ""
-
-    # Try without elevation first (works on Win11 22H2+ and Win10 builds with WSL2 pre-enabled)
-    try {
-        Start-Process wsl.exe -ArgumentList '--install -d Ubuntu --no-launch' -PassThru -Wait -WindowStyle Normal | Out-Null
-    } catch {}
-
-    # Wait up to 2 min
-    $w = 0
-    while ($w -lt 120) {
-        Start-Sleep 5; $w += 5
-        if (Test-UbuntuInstalled) { $wslOk = $true; break }
-        if ($w % 30 -eq 0) { _step "  Still installing WSL2... ($w s)" }
+    if (-not $BASH) {
+        $fc = Get-Command bash.exe -ErrorAction SilentlyContinue
+        if ($fc -and $fc.Source -notmatch 'System32') { $BASH = $fc.Source }
     }
 
-    # Retry with elevation if still not registered
-    if (-not $wslOk) {
-        _step "Retrying with elevated privileges..."
-        try {
-            Start-Process powershell.exe `
-                -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "wsl --install -d Ubuntu --no-launch"' `
-                -Verb RunAs -PassThru -Wait -WindowStyle Normal | Out-Null
-        } catch {
-            _warn "UAC was denied. Run this in an Administrator PowerShell, then restart your PC:"
-            _warn "   wsl --install -d Ubuntu"
-            _warn "After restart, re-run:  .\dev.ps1"
+    if (-not $BASH) {
+        _step "Git for Windows not found — installing via winget..."
+
+        if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+            _fail "winget not found. Install App Installer from the Microsoft Store,"
+            _fail "then re-run:  .\dev.ps1"
             exit 1
         }
-        $w = 0
-        while ($w -lt 180) {
-            Start-Sleep 5; $w += 5
-            if (Test-UbuntuInstalled) { $wslOk = $true; break }
-            if ($w % 30 -eq 0) { _step "  Still waiting for Ubuntu... ($w s)" }
+
+        winget install --id Git.Git --silent --accept-package-agreements --accept-source-agreements --scope machine 2>&1 | Out-Null
+
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
+                    [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+
+        foreach ($p in @(
+            "$env:PROGRAMFILES\Git\bin\bash.exe",
+            "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe",
+            "C:\Program Files\Git\bin\bash.exe"
+        )) { if (Test-Path $p) { $BASH = $p; break } }
+
+        if ($BASH) { _ok "Git for Windows installed  ($BASH)" }
+        else {
+            _warn "Git installed but bash.exe not found in PATH yet."
+            _warn "This is fine — WSL2 is the primary runtime. Continuing..."
         }
+    } else {
+        _ok "Git Bash: $BASH"
     }
+
+    # ── 2. WSL2 + Ubuntu ─────────────────────────────────────────────────────────
+    _step "Checking WSL2 + Ubuntu..."
 
     if (-not $wslOk) {
-        _warn "Ubuntu did not appear after install. A reboot may be needed."
-        _warn "Restart your PC, then re-run:  .\dev.ps1"
+        _step "WSL2 + Ubuntu not found — installing (one-time, ~3-5 min)..."
+        _step "A UAC prompt may appear — please accept it."
+        Write-Host ""
+
+        # Try without elevation first (works on Win11 22H2+ and Win10 builds with WSL2 pre-enabled)
+        try {
+            Start-Process wsl.exe -ArgumentList '--install -d Ubuntu --no-launch' -PassThru -Wait -WindowStyle Normal | Out-Null
+        } catch {}
+
+        # Wait up to 2 min
+        $w = 0
+        while ($w -lt 120) {
+            Start-Sleep 5; $w += 5
+            if (Test-UbuntuInstalled) { $wslOk = $true; break }
+            if ($w % 30 -eq 0) { _step "  Still installing WSL2... ($w s)" }
+        }
+
+        # Retry with elevation if still not registered
+        if (-not $wslOk) {
+            _step "Retrying with elevated privileges..."
+            try {
+                Start-Process powershell.exe `
+                    -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "wsl --install -d Ubuntu --no-launch"' `
+                    -Verb RunAs -PassThru -Wait -WindowStyle Normal | Out-Null
+            } catch {
+                _warn "UAC was denied. Run this in an Administrator PowerShell, then restart your PC:"
+                _warn "   wsl --install -d Ubuntu"
+                _warn "After restart, re-run:  .\dev.ps1"
+                exit 1
+            }
+            $w = 0
+            while ($w -lt 180) {
+                Start-Sleep 5; $w += 5
+                if (Test-UbuntuInstalled) { $wslOk = $true; break }
+                if ($w % 30 -eq 0) { _step "  Still waiting for Ubuntu... ($w s)" }
+            }
+        }
+
+        if (-not $wslOk) {
+            _warn "Ubuntu did not appear after install. A reboot may be needed."
+            _warn "Restart your PC, then re-run:  .\dev.ps1"
+            exit 1
+        }
+        _ok "WSL2 + Ubuntu installed"
+    } else {
+        _ok "WSL2 Ubuntu ready"
+    }
+
+    # ── 3. Ubuntu first-boot ──────────────────────────────────────────────────────
+    # A freshly installed distro may still be extracting its rootfs (~30 s).
+    _step "Waiting for Ubuntu to respond..."
+    $ready = $false; $w = 0
+    while ($w -lt 240) {
+        try {
+            $out = (wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>$null) -join ''
+            if ($out -match 'ready') { $ready = $true; break }
+        } catch {}
+        Start-Sleep 5; $w += 5
+        if ($w % 30 -eq 0) { _step "  Still initialising Ubuntu... ($w s)" }
+    }
+
+    if (-not $ready) {
+        # Ubuntu may be waiting on an interactive first-launch password dialog.
+        # Set root as default user so it runs unattended.
+        _step "Setting Ubuntu default user to root (unattended mode)..."
+        try { ubuntu.exe config --default-user root 2>$null } catch {}
+        wsl.exe --terminate Ubuntu 2>$null | Out-Null
+        Start-Sleep 3
+        try {
+            $out = (wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>$null) -join ''
+            $ready = $out -match 'ready'
+        } catch {}
+    }
+
+    if (-not $ready) {
+        _fail "Ubuntu is installed but won't respond."
+        _fail "Open a terminal and run:  wsl -d Ubuntu"
+        _fail "Complete the first-launch setup, then re-run:  .\dev.ps1"
         exit 1
     }
-    _ok "WSL2 + Ubuntu installed"
-} else {
-    _ok "WSL2 Ubuntu ready"
-}
+    _ok "Ubuntu ready"
 
-# ── 3. Ubuntu first-boot ──────────────────────────────────────────────────────
-# A freshly installed distro may still be extracting its rootfs (~30 s).
-_step "Waiting for Ubuntu to respond..."
-$ready = $false; $w = 0
-while ($w -lt 240) {
-    try {
-        $out = (wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>$null) -join ''
-        if ($out -match 'ready') { $ready = $true; break }
-    } catch {}
-    Start-Sleep 5; $w += 5
-    if ($w % 30 -eq 0) { _step "  Still initialising Ubuntu... ($w s)" }
-}
-
-if (-not $ready) {
-    # Ubuntu may be waiting on an interactive first-launch password dialog.
-    # Set root as default user so it runs unattended.
-    _step "Setting Ubuntu default user to root (unattended mode)..."
-    try { ubuntu.exe config --default-user root 2>$null } catch {}
-    wsl.exe --terminate Ubuntu 2>$null | Out-Null
-    Start-Sleep 3
-    try {
-        $out = (wsl.exe -d Ubuntu -- bash -c 'echo ready' 2>$null) -join ''
-        $ready = $out -match 'ready'
-    } catch {}
-}
-
-if (-not $ready) {
-    _fail "Ubuntu is installed but won't respond."
-    _fail "Open a terminal and run:  wsl -d Ubuntu"
-    _fail "Complete the first-launch setup, then re-run:  .\dev.ps1"
-    exit 1
-}
-_ok "Ubuntu ready"
-
-# ── 4. Bootstrap tools inside Ubuntu (idempotent) ────────────────────────────
-_step "Checking/installing dev tools inside Ubuntu..."
-Write-Host ""
+    # ── 4. Bootstrap tools inside Ubuntu (idempotent) ────────────────────────────
+    _step "Checking/installing dev tools inside Ubuntu..."
+    Write-Host ""
 
 $bootstrapScript = @'
 set -e
@@ -438,23 +451,26 @@ echo ""
 echo "  OK All tools ready inside Ubuntu"
 '@
 
-$bootstrapScript | wsl.exe -d Ubuntu -- bash -s
-if ($LASTEXITCODE -ne 0) {
-    _warn "Tool bootstrap had errors (non-fatal — will retry next run)"
+    # Write bootstrap script to temp file with Unix line endings to avoid bash parse errors
+    $tmpBootstrap = "/tmp/devtools-bootstrap-$PID.sh"
+    $tmpBootstrapWin = "\\wsl.localhost\Ubuntu\tmp\devtools-bootstrap-$PID.sh"
+    # Convert CRLF to LF before writing
+    $bootstrapScriptUnix = $bootstrapScript -replace "`r`n", "`n" -replace "`r", "`n"
+    [System.IO.File]::WriteAllText($tmpBootstrapWin, $bootstrapScriptUnix, (New-Object System.Text.UTF8Encoding $false))
+    wsl.exe -d Ubuntu -- chmod +x $tmpBootstrap
+    wsl.exe -d Ubuntu -- bash $tmpBootstrap
+    $bootstrapExit = $LASTEXITCODE
+    wsl.exe -d Ubuntu -- rm -f $tmpBootstrap 2>$null | Out-Null
+    if ($bootstrapExit -ne 0) {
+        _warn "Tool bootstrap had errors (non-fatal — will retry next run)"
+    }
+
+    Write-Host ""
 }
 
 # ── 5. Convert Windows path → WSL2 path and hand off ────────────────────────
-Write-Host ""
-_step "Switching to WSL2 Linux environment..."
-
 $wslRoot = Get-WslPath $ROOT_DIR
-_ok "WSL2 path: $wslRoot"
-Write-Host ""
-
 $argStr = Build-ArgStr $DevArgs
-
-_step "Running dev.sh inside Ubuntu..."
-Write-Host ""
 
 # Write the command to a temp script to avoid PowerShell quoting issues.
 # Use [IO.File]::WriteAllText with explicit LF endings — piping through

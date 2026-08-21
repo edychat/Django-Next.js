@@ -4,33 +4,96 @@ Project-specific overrides — keep settings.py as a shared template.
 • Python section  : extra INSTALLED_APPS, setting overrides, integrations
 • Services section: extra Docker Compose services for this project
   (written as YAML in the COMPOSE_SERVICES string below — dev.sh picks it up)
-• Sync section    : SYNC_PROJECT_PATHS — auto-discovered, no hardcoding needed.
-  dev.sh sync skips these paths when pulling template updates.
+• Sync section    : SYNC_PROJECT_PATHS tells dev.sh sync which paths are
+  project-owned (will not be overwritten when pulling template updates)
 """
+import json
+import logging
 import os
 from pathlib import Path
 
-_BASE_DIR = Path(__file__).resolve().parent       # backend/
-_PROJECT_ROOT = _BASE_DIR.parent                  # repo root
+_logger = logging.getLogger(__name__)
+_BASE_DIR = Path(__file__).resolve().parent
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() == "true"
 
 
 # Python settings ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
-# Custom URL prefixes for apps: CUSTOM_URL_PREFIXES = {"myapp": "my-prefix"}
 
-# Stripe
-STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
-STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
-STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
+# Example: Stripe integration (uncomment and configure as needed)
+# STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
+# STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+# STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
 
-print(f"⊧ STRIPE: {'Test' if os.getenv('DJANGO_DEBUG', 'False').lower() == 'true' else 'Live'} keys configured")
+# Example: Twilio SMS/voice verification (uncomment and configure as needed)
+# TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+# TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+# TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
+# TWILIO_VERIFY_SERVICE_SID = os.getenv('TWILIO_VERIFY_SERVICE_SID')
+# TWILIO_VOICE_GREETING = os.getenv(
+#     'TWILIO_VOICE_GREETING',
+#     'Hello from assistant. Please confirm your action by saying yes or no.',
+# )
+
+# Custom URL prefixes — map app names to a different URL prefix when needed.
+# Apps not listed use their own name automatically. See config/urls.py.
+# Example: CUSTOM_URL_PREFIXES = {"myapp": "custom-prefix"}
+CUSTOM_URL_PREFIXES = {}
+
+# GCS (production media storage) ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
+# Only active in production (DEBUG=False) when GCS_BUCKET_NAME is set.
+# Overrides MEDIA_URL and MEDIA_ROOT from settings.py.
+# Remove this block to fall back to local file storage.
+if not DEBUG:
+    _bucket = os.getenv('GCS_BUCKET_NAME')
+    _project_id = os.getenv('GCS_PROJECT_ID')
+    _credentials = None
+    _credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    if _credentials_json:
+        try:
+            _parsed = json.loads(_credentials_json)
+            _required = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+            if isinstance(_parsed, dict) and all(k in _parsed for k in _required):
+                _credentials = _parsed
+            else:
+                _logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON missing required fields")
+        except (json.JSONDecodeError, Exception):
+            _logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON is not valid JSON")
+
+    if _bucket and _project_id:
+        INSTALLED_APPS = [  # noqa: F821 — appended to settings.py's list via import *
+            'storages',
+        ]
+        STORAGES = {
+            "default": {
+                "BACKEND": "storages.backends.gcloud.GoogleCloudStorage",
+                "OPTIONS": {
+                    "bucket_name": _bucket,
+                    "project_id": _project_id,
+                    "credentials": _credentials,
+                    "default_acl": None,
+                    "querystring_auth": True,
+                    "expiration": 3600,
+                    "file_overwrite": False,
+                    "location": "media",
+                },
+            },
+            "staticfiles": {
+                "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            },
+        }
+        MEDIA_URL = f"https://storage.googleapis.com/{_bucket}/media/"
+        MEDIA_ROOT = str(_BASE_DIR / 'media')
+        _logger.info("GCS storage configured: bucket=%s", _bucket)
+    else:
+        _logger.info("GCS_PROJECT_ID not set — using local file storage")
 
 
 # Sync protection ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
-# Auto-discovered — no hardcoding needed.
-# Backend : any folder with __init__.py (Django apps), excluding config/
-# Mobile  : any folder with package.json under frontend/mobile/, excluding shared/
+# Auto-discovered — no need to hardcode.
+# Backend: any folder with an __init__.py (Django apps), excluding config/
+# Mobile:  any folder with a package.json under frontend/mobile/, excluding shared/
 _MOBILE_SKIP = {'shared', 'node_modules', 'scripts', 'packages'}
-_MOBILE_DIR = _PROJECT_ROOT / 'frontend' / 'mobile'
+_PROJECT_ROOT = _BASE_DIR.parent
 
 SYNC_PROJECT_PATHS = (
     # All Django apps in backend/
@@ -43,31 +106,37 @@ SYNC_PROJECT_PATHS = (
     ]
     +
     # All Expo/RN apps in frontend/mobile/
-    (
-        [
-            f"frontend/mobile/{item}/"
-            for item in os.listdir(_MOBILE_DIR)
-            if item not in _MOBILE_SKIP
-            and os.path.isdir(_MOBILE_DIR / item)
-            and os.path.isfile(_MOBILE_DIR / item / 'package.json')
-        ]
-        if _MOBILE_DIR.is_dir() else []
-    )
+    [
+        f"frontend/mobile/{item}/"
+        for item in os.listdir(_PROJECT_ROOT / 'frontend' / 'mobile')
+        if item not in _MOBILE_SKIP
+        and os.path.isdir(_PROJECT_ROOT / 'frontend' / 'mobile' / item)
+        and os.path.isfile(_PROJECT_ROOT / 'frontend' / 'mobile' / item / 'package.json')
+    ]
+    if (_PROJECT_ROOT / 'frontend' / 'mobile').is_dir() else []
 )
 
 
 # Compose services ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
 # Extra Docker Compose services merged alongside dev.yml by dev.sh.
-# Add project-specific services here — dev.yml stays a clean shared template.
 #
-# Example — mount a large data directory into the frontend container:
+# Mobile services are auto-discovered and generated dynamically by dev.sh's
+# gen_mobile_yaml() function — it scans frontend/mobile/ for any folder with
+# a package.json and creates services automatically.
 #
-# COMPOSE_SERVICES = """
+# To add project-specific backend services or custom containers, define them
+# in the COMPOSE_SERVICES string below (YAML format).
+#
+# Startup logic: add <app>/management/commands/entrypoint.py to any app.
+# entrypoint.sh calls `manage.py entrypoint` which Django discovers it automatically.
+
+COMPOSE_SERVICES = """
+# Project-specific services go here (merged with dev.yml by dev.sh)
+# Mobile services are auto-generated — no need to define them here.
+#
+# Example: Mount extra data directory into frontend
 # services:
 #   frontend:
 #     volumes:
-#       - ./frontend/web/public/mydata:/app/public/mydata:z,ro
-# """
-#
-# Startup hook: add <app>/management/commands/entrypoint.py to any app.
-# entrypoint.sh calls `manage.py entrypoint` — Django auto-discovers it.
+#       - ./data:/app/public/data:z,ro
+"""

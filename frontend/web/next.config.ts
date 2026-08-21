@@ -79,6 +79,13 @@ const nextConfig: NextConfig = {
   },
 
   webpack: (config, { dev, isServer }) => {
+    // Add path alias for shared mobile code
+    config.resolve = config.resolve || {};
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@shared': require('path').join(__dirname, 'shared'),
+    };
+
     if (dev && !isServer) {
       // Polling is required on macOS (Podman VM) and Windows (WSL2) because
       // inotify/FSEvents don't fire across the host → VM → container boundary.

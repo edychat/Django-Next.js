@@ -126,6 +126,7 @@ services:
       NEXT_PUBLIC_API_URL: "/api"
     volumes:
       - ./frontend/web:/app:z
+      - ./frontend/mobile/shared:/app/shared:z
       - frontend_node_modules:/app/node_modules
       - frontend_next:/app/.next
     # No host port binding — frontend is ONLY accessible via Traefik at

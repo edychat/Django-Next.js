@@ -2608,13 +2608,49 @@ _ensure_global_traefik() {
   local _sock=""
   _sock=$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)
   if [[ -z "$_sock" || ! -S "$_sock" ]]; then
-    for _s in \
-      /var/folders/*/T/podman/podman-machine-default-api.sock \
-      /run/podman/podman.sock \
-      /run/user/$(id -u)/podman/podman.sock \
-      /tmp/podman-run-$(id -u)/podman/podman.sock; do
-      [[ -S "$_s" ]] && _sock="$_s" && break
-    done
+    # On WSL/Linux, ensure the Podman socket service is running
+    if [[ "$OS" != "mac" ]]; then
+      local _podman_socket_needed=false
+      for _s in \
+        /run/podman/podman.sock \
+        /run/user/$(id -u)/podman/podman.sock \
+        /tmp/podman-run-$(id -u)/podman/podman.sock; do
+        if [[ ! -S "$_s" ]]; then
+          _podman_socket_needed=true
+        else
+          _sock="$_s"
+          break
+        fi
+      done
+      
+      # Start the Podman socket service if needed
+      if [[ "$_podman_socket_needed" == "true" || -z "$_sock" ]]; then
+        if [[ -w /run/podman ]]; then
+          _sock="/run/podman/podman.sock"
+        elif [[ -w /run/user/$(id -u) ]]; then
+          mkdir -p /run/user/$(id -u)/podman
+          _sock="/run/user/$(id -u)/podman/podman.sock"
+        else
+          mkdir -p /tmp/podman-run-$(id -u)/podman
+          _sock="/tmp/podman-run-$(id -u)/podman/podman.sock"
+        fi
+        
+        # Kill any existing socket service and start a new one
+        pkill -f "podman system service.*${_sock}" 2>/dev/null || true
+        rm -f "$_sock" 2>/dev/null || true
+        nohup podman system service --time=0 "unix://${_sock}" >/tmp/podman-socket.log 2>&1 &
+        sleep 2
+      fi
+    else
+      # macOS Podman machine
+      for _s in \
+        /var/folders/*/T/podman/podman-machine-default-api.sock \
+        /run/podman/podman.sock \
+        /run/user/$(id -u)/podman/podman.sock \
+        /tmp/podman-run-$(id -u)/podman/podman.sock; do
+        [[ -S "$_s" ]] && _sock="$_s" && break
+      done
+    fi
   fi
 
   local _sock_args=()
