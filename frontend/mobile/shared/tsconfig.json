@@ -3,8 +3,8 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@shared/*": ["../../shared/*"],
-      "@assets/*": ["../../shared/assets/*"]
+      "@shared/*": ["../shared/*"],
+      "@assets/*": ["../../web/public/*"]
     }
   },
   "include": ["./**/*.ts", "./**/*.tsx"]

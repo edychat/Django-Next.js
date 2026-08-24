@@ -1,63 +1,14 @@
 /**
- * Shared constants and configuration for EliteCar
+ * Shared constants and configuration
  * Used by both web and mobile applications
  */
-
-// Storage keys - now account-based (will be suffixed with user email)
-export const STORAGE_KEYS = {
-  RIDE_SEARCH_DATA: 'elitecar_search_data',
-  DRIVER_LOGIN: 'elitecar_driver_login',
-  DRIVER_RADIUS: 'elitecar_driver_radius',
-  DRIVER_ACTIVE_RIDE: 'elitecar_driver_active_ride',
-  PASSENGER_ACTIVE_RIDE: 'elitecar_passenger_active_ride',
-  PASSENGER_PHONE: 'elitecar_passenger_phone',
-} as const;
-
-// Time constants (in milliseconds)
-export const TIME_CONSTANTS = {
-  DRIVER_LOGIN_EXPIRY_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
-  PASSENGER_RIDE_EXPIRY_MS: 24 * 60 * 60 * 1000, // 24 hours
-  RIDE_DATA_EXPIRY_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
-  DRIVER_ACTIVE_RIDE_EXPIRY_MS: 24 * 60 * 60 * 1000, // 24 hours
-} as const;
-
-// Distance constants
-export const DISTANCE_CONSTANTS = {
-  MAX_DRIVER_RADIUS_KM: 50,
-  DEFAULT_DRIVER_RADIUS_KM: 10,
-} as const;
 
 // API endpoints
 export const API_ENDPOINTS = {
   CSRF: '/csrf/',
-  RIDES: '/rides/',
-  DRIVERS: '/drivers/',
   USERS: '/users/',
   PAYMENTS: '/payments/',
   SUBSCRIPTIONS: '/subscriptions/',
-} as const;
-
-// Ride types
-export const RIDE_TYPES = {
-  ELITERIDE: 'elitecar',
-  PREMIUM: 'premium',
-  ECONOMY: 'economy',
-} as const;
-
-// Ride status values
-export const RIDE_STATUS = {
-  REQUESTED: 'requested',
-  MATCHED: 'matched',
-  ARRIVING: 'arriving',
-  PASSENGER_ONBOARD: 'passenger_onboard',
-  COMPLETED: 'completed',
-  CANCELLED: 'cancelled',
-} as const;
-
-// Default values
-export const DEFAULTS = {
-  SELECTED_RIDE: RIDE_TYPES.ELITERIDE,
-  PAYMENT_METHOD: 'visa-1234',
 } as const;
 
 // App configuration (to be overridden by environment variables)

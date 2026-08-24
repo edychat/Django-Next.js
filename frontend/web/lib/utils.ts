@@ -1,5 +1,5 @@
 /**
- * Shared utility functions for EliteCar
+ * Shared utility functions
  */
 
 // ─── Location / Nominatim helpers ─────────────────────────────────────────────
@@ -68,7 +68,7 @@ export async function searchNominatim(
     viewboxParam;
 
   const res = await fetch(url, {
-    headers: { 'User-Agent': 'EliteCar/1.0' },
+    headers: { 'User-Agent': 'Mozilla/5.0' },
     signal,
   });
 
@@ -106,7 +106,7 @@ export async function fetchNearbyPlacesNominatim(
     `&viewbox=${lng - 0.05},${lat + 0.05},${lng + 0.05},${lat - 0.05}`;
 
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'EliteCar/1.0' } });
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!res.ok) return [];
 
     const data = (await res.json()) as NominatimResult;

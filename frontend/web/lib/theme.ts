@@ -1,5 +1,5 @@
 /**
- * Shared design tokens and theme for EliteCar
+ * Shared design tokens and theme
  * Used by both web and mobile applications
  */
 

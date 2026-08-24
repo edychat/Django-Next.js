@@ -1,5 +1,5 @@
 /**
- * Shared Metro configuration factory for OldBook.ai mobile apps.
+ * Shared Metro configuration factory for mobile apps.
  *
  * Usage from each app's metro.config.js:
  *
@@ -7,8 +7,8 @@
  *   module.exports = createMetroConfig(__dirname, { /* overrides *\/ });
  *
  * Features:
- *  - @shared/* → frontend/web/lib/ alias (shared TS code lives in the web project)
- *  - @assets/* → frontend/web/public/assets/ alias
+ *  - @shared/* → frontend/mobile/shared/ alias (shared components between mobile apps)
+ *  - Assets served from frontend/web/public/ (single source of truth for web + mobile)
  *  - Stat-based polling watcher for virtiofs (Docker on macOS)
  *  - FileStore caching
  *  - EAS / production optimisations
@@ -22,20 +22,17 @@ const fs   = require('fs');
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /**
- * Resolve the shared code directory from an app folder.
+ * Resolve the shared components directory (mobile/shared/).
  * Handles multiple environments:
- *   1. Host (dev): <repo>/frontend/mobile/<app>/  → <repo>/frontend/web/lib/
+ *   1. Host (dev): <repo>/frontend/mobile/<app>/  → <repo>/frontend/mobile/shared/
  *   2. Docker/Podman: /app/<app>/                 → /app/shared/
- *   3. Docker legacy: /app/<app>/                 → /app/web/lib/
  */
 function resolveSharedRoot(appDir) {
   const candidates = [
-    // Standard monorepo layout: frontend/mobile/<app>/ → frontend/web/lib/
-    path.resolve(appDir, '../../../web/lib'),
-    // Podman/Docker with shared mount: /app/<app>/ → /app/shared/
+    // Standard monorepo layout: frontend/mobile/<app>/ → frontend/mobile/shared/
     path.resolve(appDir, '../shared'),
-    // Docker legacy mount: /app/<app>/ → /app/web/lib/
-    path.resolve(appDir, '../../web/lib'),
+    // Docker mount: /app/<app>/ → /app/shared/
+    path.resolve(appDir, '../shared'),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
@@ -44,12 +41,12 @@ function resolveSharedRoot(appDir) {
 }
 
 /**
- * Resolve the web/public/assets directory from an app folder.
+ * Resolve the web/public directory (assets source of truth).
  */
 function resolveAssetsRoot(appDir) {
   const candidates = [
-    path.resolve(appDir, '../../../web/public/assets'),
-    path.resolve(appDir, '../../web/public/assets'),
+    path.resolve(appDir, '../../../web/public'),
+    path.resolve(appDir, '../../web/public'),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
@@ -87,8 +84,8 @@ function createMetroConfig(appDir, overrides = {}) {
   })();
 
   const config      = getDefaultConfig(appDir);
-  const sharedRoot  = resolveSharedRoot(appDir);   // frontend/web/lib/
-  const assetsRoot  = resolveAssetsRoot(appDir);   // frontend/web/public/assets/
+  const sharedRoot  = resolveSharedRoot(appDir);   // frontend/mobile/shared/
+  const assetsRoot  = resolveAssetsRoot(appDir);   // frontend/web/public/
   const mobileRoot  = path.dirname(appDir);        // frontend/mobile/
 
   // ── Watch folders ────────────────────────────────────────────────────────
@@ -96,12 +93,8 @@ function createMetroConfig(appDir, overrides = {}) {
     ...(config.watchFolders || []),
     sharedRoot,
     mobileRoot,
+    assetsRoot,
   ].filter((v, i, a) => a.indexOf(v) === i);
-  
-  // Add /shared/assets/ if it exists (Docker/Podman root-level mount)
-  if (fs.existsSync('/shared/assets')) {
-    config.watchFolders.push('/shared/assets');
-  }
 
   // ── Resolver aliases ─────────────────────────────────────────────────────
   config.resolver = config.resolver || {};
@@ -110,36 +103,14 @@ function createMetroConfig(appDir, overrides = {}) {
     ...(config.resolver.extraNodeModules || {}),
   };
 
-  // Intercept @shared/* requires and redirect appropriately
+  // Intercept @shared/* requires and redirect to mobile/shared/
   const _origResolveRequest = config.resolver.resolveRequest;
   config.resolver.resolveRequest = (context, moduleName, platform) => {
-    // Handle @shared/assets/* - look for image/asset files
-    if (moduleName.startsWith('@shared/assets/')) {
-      const assetName = moduleName.slice('@shared/assets/'.length);
-      // Try multiple locations for assets:
-      const candidates = [
-        // Docker/Podman: /shared/assets/ (root-level mount)
-        path.join('/shared/assets', assetName),
-        // Host dev: frontend/mobile/shared/assets/
-        path.join(mobileRoot, 'shared/assets', assetName),
-        // Fallback: web/public/ (without assets subdirectory)
-        path.join(path.dirname(assetsRoot), assetName),
-        // Fallback: web/public/assets/
-        path.join(assetsRoot, assetName),
-      ];
-      
-      for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) {
-          return { type: 'sourceFile', filePath: candidate };
-        }
-      }
-    }
-    
-    // Handle @shared/* (non-assets) - look for TS/JS code
+    // Handle @shared/* - look for components in mobile/shared/
     if (moduleName.startsWith('@shared/') || moduleName === '@shared') {
       const subpath = moduleName === '@shared' ? '' : moduleName.slice('@shared/'.length);
       const resolved = path.join(sharedRoot, subpath);
-      if (fs.existsSync(resolved) || fs.existsSync(resolved + '.ts') || fs.existsSync(resolved + '.tsx')) {
+      if (fs.existsSync(resolved) || fs.existsSync(resolved + '.ts') || fs.existsSync(resolved + '.tsx') || fs.existsSync(resolved + '.js')) {
         return context.resolveRequest(context, resolved, platform);
       }
     }

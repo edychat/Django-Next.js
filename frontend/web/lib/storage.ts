@@ -1,15 +1,7 @@
 /**
- * Platform-agnostic storage interface for EliteCar
+ * Platform-agnostic storage interface
  * Works with localStorage (web) or AsyncStorage (React Native)
  */
-
-import {
-  RideSearchData,
-  DriverLoginData,
-  ActiveRideData,
-  PassengerActiveRideData,
-} from './types';
-import { STORAGE_KEYS, TIME_CONSTANTS, DISTANCE_CONSTANTS, DEFAULTS } from './constants';
 
 /**
  * Storage interface that can be implemented for different platforms
@@ -42,297 +34,48 @@ export class WebStorage implements IStorage {
 
 /**
  * Storage manager that provides high-level storage operations
- * Now supports account-based caching using user identifiers
  */
 export class StorageManager {
   private storage: IStorage;
-  private userIdentifier: string | null = null;
 
   constructor(storage: IStorage) {
     this.storage = storage;
   }
 
   /**
-   * Set the current user identifier for account-based storage
-   * This should be called after login with the user's email or phone
+   * Save data to storage
    */
-  setUserIdentifier(identifier: string | null): void {
-    this.userIdentifier = identifier;
+  async save(key: string, data: any): Promise<void> {
+    try {
+      await this.storage.setItem(key, JSON.stringify(data));
+    } catch (error) {
+      console.error('Error saving data:', error);
+    }
   }
 
   /**
-   * Get the current user identifier
+   * Load data from storage
    */
-  getUserIdentifier(): string | null {
-    return this.userIdentifier;
+  async load<T = any>(key: string): Promise<T | null> {
+    try {
+      const stored = await this.storage.getItem(key);
+      if (stored) {
+        return JSON.parse(stored) as T;
+      }
+    } catch (error) {
+      console.error('Error loading data:', error);
+    }
+    return null;
   }
 
   /**
-   * Generate a storage key with user identifier suffix
+   * Remove data from storage
    */
-  private getUserKey(baseKey: string): string {
-    if (this.userIdentifier) {
-      return `${baseKey}_${this.userIdentifier}`;
-    }
-    return baseKey;
-  }
-
-  // Ride search data management - account-based
-  async saveRideSearchData(data: Partial<RideSearchData>): Promise<void> {
+  async remove(key: string): Promise<void> {
     try {
-      const existingData = await this.getRideSearchData();
-      const updatedData: RideSearchData = {
-        ...existingData,
-        ...data,
-        timestamp: Date.now(),
-      };
-      const key = this.getUserKey(STORAGE_KEYS.RIDE_SEARCH_DATA);
-      await this.storage.setItem(key, JSON.stringify(updatedData));
-    } catch (error) {
-      console.error('Error saving ride search data:', error);
-    }
-  }
-
-  async getRideSearchData(): Promise<RideSearchData> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.RIDE_SEARCH_DATA);
-      const stored = await this.storage.getItem(key);
-      if (stored) {
-        const data = JSON.parse(stored);
-        // Check if data is not too old
-        if (data.timestamp && Date.now() - data.timestamp < TIME_CONSTANTS.RIDE_DATA_EXPIRY_MS) {
-          return data;
-        }
-      }
-    } catch (error) {
-      console.error('Error retrieving ride search data:', error);
-    }
-    return this.getDefaultSearchData();
-  }
-
-  async clearRideSearchData(): Promise<void> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.RIDE_SEARCH_DATA);
       await this.storage.removeItem(key);
     } catch (error) {
-      console.error('Error clearing ride search data:', error);
-    }
-  }
-
-  private getDefaultSearchData(): RideSearchData {
-    return {
-      pickup: '',
-      dropoff: '',
-      passengerName: '',
-      passengerPhone: '',
-      selectedRide: DEFAULTS.SELECTED_RIDE,
-      paymentMethod: DEFAULTS.PAYMENT_METHOD,
-      pickupCoordinates: null,
-      dropoffCoordinates: null,
-      timestamp: Date.now(),
-    };
-  }
-
-  // Driver login management
-  async saveDriverLogin(email: string): Promise<void> {
-    try {
-      const loginData: DriverLoginData = {
-        email,
-        timestamp: Date.now(),
-      };
-      await this.storage.setItem(STORAGE_KEYS.DRIVER_LOGIN, JSON.stringify(loginData));
-    } catch (error) {
-      console.error('Error saving driver login:', error);
-    }
-  }
-
-  async getDriverLogin(): Promise<DriverLoginData | null> {
-    try {
-      const stored = await this.storage.getItem(STORAGE_KEYS.DRIVER_LOGIN);
-      if (stored) {
-        const data = JSON.parse(stored);
-        // Check if login is not expired
-        if (data.timestamp && Date.now() - data.timestamp < TIME_CONSTANTS.DRIVER_LOGIN_EXPIRY_MS) {
-          return data;
-        }
-        // Clear expired login
-        await this.clearDriverLogin();
-      }
-    } catch (error) {
-      console.error('Error retrieving driver login:', error);
-    }
-    return null;
-  }
-
-  async clearDriverLogin(): Promise<void> {
-    try {
-      await this.storage.removeItem(STORAGE_KEYS.DRIVER_LOGIN);
-    } catch (error) {
-      console.error('Error clearing driver login:', error);
-    }
-  }
-
-  // Driver radius management
-  async saveDriverRadius(radius: number): Promise<void> {
-    try {
-      await this.storage.setItem(STORAGE_KEYS.DRIVER_RADIUS, radius.toString());
-    } catch (error) {
-      console.error('Error saving driver radius:', error);
-    }
-  }
-
-  async getDriverRadius(defaultRadius: number = DISTANCE_CONSTANTS.DEFAULT_DRIVER_RADIUS_KM): Promise<number> {
-    try {
-      const stored = await this.storage.getItem(STORAGE_KEYS.DRIVER_RADIUS);
-      if (stored) {
-        const radius = parseFloat(stored);
-        if (!isNaN(radius) && radius > 0 && radius <= DISTANCE_CONSTANTS.MAX_DRIVER_RADIUS_KM) {
-          return radius;
-        }
-      }
-    } catch (error) {
-      console.error('Error retrieving driver radius:', error);
-    }
-    return defaultRadius;
-  }
-
-  // Driver active ride management - now account-based
-  async saveDriverActiveRide(ride: ActiveRideData): Promise<void> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.DRIVER_ACTIVE_RIDE);
-      await this.storage.setItem(key, JSON.stringify(ride));
-    } catch (error) {
-      console.error('Error saving driver active ride:', error);
-    }
-  }
-
-  async getDriverActiveRide(): Promise<ActiveRideData | null> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.DRIVER_ACTIVE_RIDE);
-      const stored = await this.storage.getItem(key);
-      if (stored) {
-        const data = JSON.parse(stored);
-        
-        // Validate data structure
-        if (!data || typeof data !== 'object') {
-          console.warn('Invalid active ride data structure, clearing');
-          await this.clearDriverActiveRide();
-          return null;
-        }
-        
-        // Check required fields
-        if (!data.id || !data.rideId || !data.timestamp) {
-          console.warn('Missing required fields in active ride data, clearing');
-          await this.clearDriverActiveRide();
-          return null;
-        }
-        
-        // Check if ride data is not too old
-        if (typeof data.timestamp === 'number' && 
-            Date.now() - data.timestamp < TIME_CONSTANTS.DRIVER_ACTIVE_RIDE_EXPIRY_MS) {
-          return data as ActiveRideData;
-        }
-        
-        // Clear expired ride data
-        console.log('Active ride data expired, clearing');
-        await this.clearDriverActiveRide();
-      }
-    } catch (error) {
-      console.error('Error retrieving driver active ride:', error);
-      await this.clearDriverActiveRide();
-    }
-    return null;
-  }
-
-  async clearDriverActiveRide(): Promise<void> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.DRIVER_ACTIVE_RIDE);
-      await this.storage.removeItem(key);
-    } catch (error) {
-      console.error('Error clearing driver active ride:', error);
-    }
-  }
-
-  // Passenger active ride management - now account-based
-  async savePassengerActiveRide(ride: PassengerActiveRideData): Promise<void> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.PASSENGER_ACTIVE_RIDE);
-      await this.storage.setItem(key, JSON.stringify(ride));
-    } catch (error) {
-      console.error('Error saving passenger active ride:', error);
-    }
-  }
-
-  async getPassengerActiveRide(): Promise<PassengerActiveRideData | null> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.PASSENGER_ACTIVE_RIDE);
-      const stored = await this.storage.getItem(key);
-      if (stored) {
-        const data = JSON.parse(stored);
-        
-        // Validate data structure
-        if (!data || typeof data !== 'object') {
-          console.warn('Invalid passenger active ride data structure, clearing');
-          await this.clearPassengerActiveRide();
-          return null;
-        }
-        
-        // Check required fields
-        if (!data.rideId || !data.timestamp) {
-          console.warn('Missing required fields in passenger active ride data, clearing');
-          await this.clearPassengerActiveRide();
-          return null;
-        }
-        
-        // Check if ride data is not too old
-        if (typeof data.timestamp === 'number' && 
-            Date.now() - data.timestamp < TIME_CONSTANTS.PASSENGER_RIDE_EXPIRY_MS) {
-          return data as PassengerActiveRideData;
-        }
-        
-        // Clear expired ride data
-        console.log('Passenger active ride data expired, clearing');
-        await this.clearPassengerActiveRide();
-      }
-    } catch (error) {
-      console.error('Error retrieving passenger active ride:', error);
-      await this.clearPassengerActiveRide();
-    }
-    return null;
-  }
-
-  async clearPassengerActiveRide(): Promise<void> {
-    try {
-      const key = this.getUserKey(STORAGE_KEYS.PASSENGER_ACTIVE_RIDE);
-      await this.storage.removeItem(key);
-    } catch (error) {
-      console.error('Error clearing passenger active ride:', error);
-    }
-  }
-
-  // Passenger phone management for account-based caching
-  async savePassengerPhone(phone: string): Promise<void> {
-    try {
-      await this.storage.setItem(STORAGE_KEYS.PASSENGER_PHONE, phone);
-    } catch (error) {
-      console.error('Error saving passenger phone:', error);
-    }
-  }
-
-  async getPassengerPhone(): Promise<string | null> {
-    try {
-      return await this.storage.getItem(STORAGE_KEYS.PASSENGER_PHONE);
-    } catch (error) {
-      console.error('Error retrieving passenger phone:', error);
-      return null;
-    }
-  }
-
-  async clearPassengerPhone(): Promise<void> {
-    try {
-      await this.storage.removeItem(STORAGE_KEYS.PASSENGER_PHONE);
-    } catch (error) {
-      console.error('Error clearing passenger phone:', error);
+      console.error('Error removing data:', error);
     }
   }
 }

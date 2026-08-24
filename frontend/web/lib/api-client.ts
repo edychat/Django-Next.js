@@ -1,5 +1,5 @@
 /**
- * Platform-agnostic API client for EliteCar
+ * Platform-agnostic API client
  * Works with both web (Next.js) and mobile (React Native) platforms
  */
 
