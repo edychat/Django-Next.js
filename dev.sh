@@ -2550,13 +2550,26 @@ _stop_cloudflare_tunnel() {
 
 # ── Detect compose command ────────────────────────────────────────────────────
 detect_compose() {
-  if command -v podman-compose &>/dev/null; then
-    DC_CMD="podman-compose"
-  else
+  if ! command -v podman-compose &>/dev/null; then
     echo "❌ podman-compose not found. Run: ./dev.sh setup"
     exit 1
   fi
+  
+  if ! command -v podman &>/dev/null; then
+    echo "❌ podman not found. Run: ./dev.sh setup"
+    exit 1
+  fi
+  
+  # Verify Podman machine is running
+  if ! podman machine list 2>/dev/null | grep -q "Currently running"; then
+    echo "❌ Podman machine is not running"
+    echo "   Start it with: podman machine start"
+    exit 1
+  fi
+  
+  DC_CMD="podman-compose"
   _wire_podman_socket
+  export CONTAINER_RUNTIME="podman"
 }
 
 # ── Global Traefik — shared across all projects on this machine ───────────────

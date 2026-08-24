@@ -1,5 +1,5 @@
-# Manual run (no mobile services): DOCKER_BUILDKIT=1 docker compose -f dev.yml up -d --build db backend frontend
-# To build/start the docker dev environment run: ./dev.sh
+# To start the dev environment, run: ./dev.sh
+# Manual run (no mobile services): podman-compose -f dev.yml up -d --build db backend frontend
 #
 # ML Service Architecture:
 #   Development (Local): ML built into Django backend at /ml_service/ endpoints
@@ -333,7 +333,7 @@ services:
       sh -c '
         if [ -z "$${RESTORE_ARCHIVE}" ]; then
           echo "❌ Error: Backup archive path required";
-          echo "Usage: RESTORE_ARCHIVE=/backend/backup/snapshots/<file.tar.gz> docker compose -f dev.yml --profile backup run --rm backup-restore";
+          echo "Usage: RESTORE_ARCHIVE=/backend/backup/snapshots/<file.tar.gz> podman-compose -f dev.yml --profile backup run --rm backup-restore";
           echo "";
           echo "Available backups:";
           /backend/backup/backup.sh list;
